@@ -29,6 +29,7 @@ use crate::{
     common::{
         batch::{Decode, RBatch},
         priority::TransportChannelRx,
+        seq_num::SeqNumWindowResult,
     },
     unicast::transport_unicast_inner::TransportUnicastTrait,
     TransportPeerEventHandler,
@@ -84,6 +85,7 @@ impl TransportUnicastUniversal {
     fn handle_frame(
         &self,
         frame: FrameReader<ZSlice>,
+        link: &Link,
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
     ) -> ZResult<()> {
         let priority = frame.ext_qos.priority();
@@ -104,7 +106,7 @@ impl TransportUnicastUniversal {
             Reliability::BestEffort => zlock!(c.best_effort),
         };
 
-        if !self.verify_sn("Frame", frame.sn, &mut guard)? {
+        if !self.verify_sn("Frame", frame.reliability, frame.sn, link, &mut guard)? {
             // Drop invalid message and continue
             return Ok(());
         }
@@ -131,6 +133,7 @@ impl TransportUnicastUniversal {
     fn handle_fragment(
         &self,
         fragment: Fragment,
+        link: &Link,
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
     ) -> ZResult<()> {
         let Fragment {
@@ -160,7 +163,7 @@ impl TransportUnicastUniversal {
             Reliability::BestEffort => zlock!(c.best_effort),
         };
 
-        if !self.verify_sn("Fragment", sn, &mut guard)? {
+        if !self.verify_sn("Fragment", reliability, sn, link, &mut guard)? {
             // Drop invalid message and continue
             return Ok(());
         }
@@ -184,7 +187,15 @@ impl TransportUnicastUniversal {
         }
         if let Err(e) = guard.defrag.push(sn, payload) {
             // Defrag errors don't close transport
-            tracing::trace!("{}", e);
+            tracing::warn!(
+                target: "zenoh_transport::drop_audit",
+                "[zenoh-rx-drop] kind=defrag_push zid={} reliability={:?} priority={:?} sn={} error={}",
+                self.config.zid,
+                reliability,
+                qos.priority(),
+                sn,
+                e,
+            );
             return Ok(());
         }
         if !more {
@@ -206,7 +217,14 @@ impl TransportUnicastUniversal {
                     );
                 }
             } else {
-                tracing::trace!("Transport: {}. Defragmentation error.", self.config.zid);
+                tracing::warn!(
+                    target: "zenoh_transport::drop_audit",
+                    "[zenoh-rx-drop] kind=defrag_decode zid={} reliability={:?} priority={:?} sn={}",
+                    self.config.zid,
+                    reliability,
+                    qos.priority(),
+                    sn,
+                );
             }
         }
 
@@ -216,22 +234,66 @@ impl TransportUnicastUniversal {
     fn verify_sn(
         &self,
         message_type: &str,
+        reliability: Reliability,
         sn: TransportSn,
+        link: &Link,
         guard: &mut MutexGuard<'_, TransportChannelRx>,
     ) -> ZResult<bool> {
-        let precedes = guard.sn.roll(sn)?;
-        if !precedes {
-            tracing::trace!(
-                "Transport: {}. {} with invalid SN dropped: {}. Expected: {}.",
-                self.config.zid,
-                message_type,
-                sn,
-                guard.sn.next()
-            );
-            return Ok(false);
+        let unordered_frame = reliability == Reliability::BestEffort
+            && message_type == "Frame"
+            && !link.is_streamed;
+        if unordered_frame {
+            if let Some(frame_sn) = guard.frame_sn.as_mut() {
+                let result = frame_sn.observe(sn)?;
+                match result {
+                    SeqNumWindowResult::Ahead => {
+                        let advanced = guard.sn.roll(sn)?;
+                        debug_assert!(advanced);
+                        return Ok(true);
+                    }
+                    SeqNumWindowResult::Reordered => {
+                        tracing::trace!(
+                            target: "zenoh_transport::drop_audit",
+                            "[zenoh-rx-reorder] action=accept_late zid={} message_type={} received_sn={} high_water_next_sn={}",
+                            self.config.zid,
+                            message_type,
+                            sn,
+                            guard.sn.next(),
+                        );
+                        return Ok(true);
+                    }
+                    SeqNumWindowResult::Duplicate | SeqNumWindowResult::TooOld => {
+                        tracing::warn!(
+                            target: "zenoh_transport::drop_audit",
+                            "[zenoh-rx-drop] kind=invalid_sn reason={:?} zid={} message_type={} received_sn={} expected_sn={}",
+                            result,
+                            self.config.zid,
+                            message_type,
+                            sn,
+                            guard.sn.next(),
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
         }
 
-        Ok(true)
+        if guard.sn.roll(sn)? {
+            if let Some(frame_sn) = guard.frame_sn.as_mut() {
+                let result = frame_sn.observe(sn)?;
+                debug_assert_eq!(result, SeqNumWindowResult::Ahead);
+            }
+            return Ok(true);
+        }
+        tracing::warn!(
+            target: "zenoh_transport::drop_audit",
+            "[zenoh-rx-drop] kind=invalid_sn reason=StrictMonotonic zid={} message_type={} received_sn={} expected_sn={}",
+            self.config.zid,
+            message_type,
+            sn,
+            guard.sn.next(),
+        );
+        Ok(false)
     }
 
     pub(super) fn read_messages(
@@ -249,6 +311,7 @@ impl TransportUnicastUniversal {
                 }
                 self.handle_frame(
                     frame,
+                    link,
                     #[cfg(feature = "stats")]
                     stats,
                 )?;
@@ -269,6 +332,7 @@ impl TransportUnicastUniversal {
                 TransportBody::Frame(_) => unreachable!(),
                 TransportBody::Fragment(fragment) => self.handle_fragment(
                     fragment,
+                    link,
                     #[cfg(feature = "stats")]
                     stats,
                 )?,
