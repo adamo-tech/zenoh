@@ -342,6 +342,7 @@ pub enum InterceptorLink {
     Unixpipe,
     UnixsockStream,
     Vsock,
+    WebTransport,
     Ws,
 }
 

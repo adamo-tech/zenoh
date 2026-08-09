@@ -467,6 +467,65 @@ async fn openclose_lowlatency_transport(endpoint: &EndPoint) {
     openclose_transport(endpoint, endpoint, true).await
 }
 
+#[cfg(feature = "transport_webtransport")]
+async fn openclose_universal_transport_webtransport(mut endpoint: EndPoint) {
+    use wtransport::tls::{Identity, Sha256DigestFmt};
+    use zenoh_link_commons::tls::config::{
+        TLS_LISTEN_CERTIFICATE_FILE, TLS_LISTEN_PRIVATE_KEY_FILE,
+    };
+
+    let identity = Identity::self_signed(["localhost", "127.0.0.1"]).unwrap();
+    let hash = identity.certificate_chain().as_slice()[0]
+        .hash()
+        .fmt(Sha256DigestFmt::DottedHex);
+    let test_dir = std::env::temp_dir().join(format!(
+        "zenoh-webtransport-openclose-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&test_dir).unwrap();
+    let cert_file = test_dir.join("certificate.pem");
+    let key_file = test_dir.join("private-key.pem");
+    identity
+        .certificate_chain()
+        .store_pemfile(&cert_file)
+        .await
+        .unwrap();
+    identity
+        .private_key()
+        .store_secret_pemfile(&key_file)
+        .await
+        .unwrap();
+
+    let mut listen_endpoint = endpoint.clone();
+    listen_endpoint
+        .config_mut()
+        .extend_from_iter(
+            [
+                (
+                    TLS_LISTEN_CERTIFICATE_FILE,
+                    cert_file.to_str().unwrap(),
+                ),
+                (
+                    TLS_LISTEN_PRIVATE_KEY_FILE,
+                    key_file.to_str().unwrap(),
+                ),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+    endpoint
+        .config_mut()
+        .extend_from_iter([("server_certificate_hash", hash.as_str())].into_iter())
+        .unwrap();
+
+    openclose_transport(&listen_endpoint, &endpoint, false).await;
+    std::fs::remove_dir_all(test_dir).unwrap();
+}
+
 #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
 async fn openclose_universal_transport_tls(
     mut endpoint: EndPoint,
@@ -568,6 +627,14 @@ async fn openclose_ws_only_with_lowlatency_transport() {
     zenoh_util::init_log_from_env_or("error");
     let endpoint: EndPoint = format!("ws/127.0.0.1:{}", 13120).parse().unwrap();
     openclose_lowlatency_transport(&endpoint).await;
+}
+
+#[cfg(feature = "transport_webtransport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_webtransport_only() {
+    zenoh_util::init_log_from_env_or("error");
+    let endpoint: EndPoint = "webtransport/127.0.0.1:13050".parse().unwrap();
+    openclose_universal_transport_webtransport(endpoint).await;
 }
 
 #[cfg(feature = "transport_unixpipe")]

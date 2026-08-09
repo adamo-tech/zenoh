@@ -147,6 +147,7 @@ pub enum LinkAuthId {
     Unixpipe,
     UnixsockStream,
     Vsock,
+    WebTransport(Option<String>),
     Ws,
 }
 
@@ -161,6 +162,7 @@ impl LinkAuthId {
             LinkAuthId::Unixpipe => None,
             LinkAuthId::UnixsockStream => None,
             LinkAuthId::Vsock => None,
+            LinkAuthId::WebTransport(n) => n.as_ref().map(|s| s.as_ref()),
             LinkAuthId::Ws => None,
         }
     }
