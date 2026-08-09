@@ -70,6 +70,15 @@ pub fn register_prebound_server_socket(socket: std::net::UdpSocket) -> ZResult<S
     Ok(address)
 }
 
+/// Remove a registered socket when session setup fails before the listener can
+/// take ownership of it. Returns true when a socket was still pending.
+pub fn unregister_prebound_server_socket(address: SocketAddr) -> bool {
+    PREBOUND_SERVER_SOCKETS
+        .lock()
+        .map(|mut sockets| sockets.remove(&address).is_some())
+        .unwrap_or(false)
+}
+
 fn take_prebound_server_socket(address: SocketAddr) -> ZResult<Option<std::net::UdpSocket>> {
     Ok(PREBOUND_SERVER_SOCKETS
         .lock()

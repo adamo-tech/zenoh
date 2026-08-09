@@ -22,4 +22,6 @@ fail closed.
 Embedded listeners whose NAT mapping was discovered before the Zenoh session
 opens can call `register_prebound_server_socket`. The next listener created on
 that socket's local address takes ownership of the exact UDP socket, preserving
-STUN and port-mapping state.
+STUN and port-mapping state. If session construction fails before ownership is
+transferred, the caller can release the pending socket with
+`unregister_prebound_server_socket`.
