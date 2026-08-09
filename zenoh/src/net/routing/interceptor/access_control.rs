@@ -25,7 +25,7 @@ use zenoh_config::{
     AclConfig, AclMessage, CertCommonName, InterceptorFlow, Interface, Permission, Username,
     ZenohId,
 };
-use zenoh_keyexpr::keyexpr;
+use zenoh_keyexpr::{keyexpr, OwnedKeyExpr};
 use zenoh_link::LinkAuthId;
 use zenoh_protocol::{
     core::ZenohIdProto,
@@ -55,9 +55,43 @@ pub struct AuthSubject {
     name: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct AuthenticatedPermission {
+    action: Option<AclMessage>,
+    keyexpr: OwnedKeyExpr,
+}
+
+impl AuthenticatedPermission {
+    fn parse(action: &str, keyexpr: String) -> Result<Self, String> {
+        let action = match action {
+            "*" => None,
+            "put" => Some(AclMessage::Put),
+            "delete" => Some(AclMessage::Delete),
+            "declare_subscriber" => Some(AclMessage::DeclareSubscriber),
+            "query" => Some(AclMessage::Query),
+            "declare_queryable" => Some(AclMessage::DeclareQueryable),
+            "reply" => Some(AclMessage::Reply),
+            "liveliness_token" => Some(AclMessage::LivelinessToken),
+            "declare_liveliness_subscriber" => {
+                Some(AclMessage::DeclareLivelinessSubscriber)
+            }
+            "liveliness_query" => Some(AclMessage::LivelinessQuery),
+            action => return Err(format!("unknown action '{action}'")),
+        };
+        let keyexpr = OwnedKeyExpr::new(keyexpr).map_err(|error| error.to_string())?;
+        Ok(Self { action, keyexpr })
+    }
+
+    fn allows(&self, action: AclMessage, keyexpr: &keyexpr) -> bool {
+        self.action.map_or(true, |allowed| allowed == action) && self.keyexpr.includes(keyexpr)
+    }
+}
+
 struct EgressAclEnforcer {
     policy_enforcer: Arc<PolicyEnforcer>,
     subject: Vec<AuthSubject>,
+    authenticated_permissions: Arc<Vec<AuthenticatedPermission>>,
+    deny_all_authenticated_permissions: bool,
     zid: ZenohIdProto,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::DropStats,
@@ -367,6 +401,8 @@ impl EgressAclEnforcer {
 struct IngressAclEnforcer {
     policy_enforcer: Arc<PolicyEnforcer>,
     subject: Vec<AuthSubject>,
+    authenticated_permissions: Arc<Vec<AuthenticatedPermission>>,
+    deny_all_authenticated_permissions: bool,
     zid: ZenohIdProto,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::DropStats,
@@ -699,20 +735,19 @@ pub(crate) fn acl_interceptor_factories(
 ) -> ZResult<Vec<InterceptorFactory>> {
     let mut res: Vec<InterceptorFactory> = vec![];
 
-    if acl_config.enabled {
-        let mut policy_enforcer = PolicyEnforcer::new();
-        match policy_enforcer.init(acl_config) {
-            Ok(_) => {
-                tracing::debug!("Access control is enabled");
-                res.push(Box::new(AclEnforcer {
-                    enforcer: Arc::new(policy_enforcer),
-                }))
-            }
-            Err(e) => bail!("Access control not enabled due to: {}", e),
-        }
-    } else {
-        tracing::debug!("Access control is disabled");
+    let mut policy_enforcer = PolicyEnforcer::new();
+    if let Err(e) = policy_enforcer.init(acl_config) {
+        bail!("Access control not enabled due to: {}", e);
     }
+    if acl_config.enabled {
+        tracing::debug!("Access control is enabled");
+    } else {
+        policy_enforcer.default_permission = Permission::Allow;
+        tracing::debug!("Configured access control is disabled; authenticated link scopes remain enforced");
+    }
+    res.push(Box::new(AclEnforcer {
+        enforcer: Arc::new(policy_enforcer),
+    }));
 
     Ok(res)
 }
@@ -761,6 +796,25 @@ impl InterceptorFactoryTrait for AclEnforcer {
                 return (None, None);
             }
         };
+        let mut deny_all_authenticated_permissions = false;
+        let mut authenticated_permissions = Vec::new();
+        for permission in links
+            .iter()
+            .flat_map(|link| link.authenticated_permissions.iter())
+        {
+            match AuthenticatedPermission::parse(&permission.action, permission.keyexpr.clone()) {
+                Ok(permission) => authenticated_permissions.push(permission),
+                Err(error) => {
+                    tracing::error!(
+                        "Transport {transport:?} has invalid authenticated permission '{}:{}': {error}",
+                        permission.action,
+                        permission.keyexpr
+                    );
+                    deny_all_authenticated_permissions = true;
+                }
+            }
+        }
+        let authenticated_permissions = Arc::new(authenticated_permissions);
         let mut interfaces = links
             .into_iter()
             .flat_map(|link| {
@@ -827,6 +881,8 @@ impl InterceptorFactoryTrait for AclEnforcer {
             policy_enforcer: self.enforcer.clone(),
             zid,
             subject: auth_subjects.clone(),
+            authenticated_permissions: authenticated_permissions.clone(),
+            deny_all_authenticated_permissions,
             #[cfg(feature = "stats")]
             stats: stats.clone(),
         });
@@ -834,17 +890,19 @@ impl InterceptorFactoryTrait for AclEnforcer {
             policy_enforcer: self.enforcer.clone(),
             zid,
             subject: auth_subjects,
+            authenticated_permissions: authenticated_permissions.clone(),
+            deny_all_authenticated_permissions,
             #[cfg(feature = "stats")]
             stats: stats.clone(),
         });
         (
-            self.enforcer
-                .interface_enabled
-                .ingress
+            (self.enforcer.interface_enabled.ingress
+                || !authenticated_permissions.is_empty()
+                || deny_all_authenticated_permissions)
                 .then_some(ingress_interceptor),
-            self.enforcer
-                .interface_enabled
-                .egress
+            (self.enforcer.interface_enabled.egress
+                || !authenticated_permissions.is_empty()
+                || deny_all_authenticated_permissions)
                 .then_some(egress_interceptor),
         )
     }
@@ -978,7 +1036,24 @@ pub trait AclActionMethods {
     fn zid(&self) -> &ZenohIdProto;
     fn flow(&self) -> InterceptorFlow;
     fn authn_ids(&self) -> &Vec<AuthSubject>;
+    fn authenticated_permissions(&self) -> &[AuthenticatedPermission];
+    fn deny_all_authenticated_permissions(&self) -> bool;
     fn action(&self, action: AclMessage, log_msg: &str, key_expr: &keyexpr) -> Permission {
+        if self.deny_all_authenticated_permissions()
+            || (!self.authenticated_permissions().is_empty()
+                && !self
+                    .authenticated_permissions()
+                    .iter()
+                    .any(|permission| permission.allows(action, key_expr)))
+        {
+            tracing::debug!(
+                "{} is outside the authenticated link permission for {} on {}",
+                key_expr,
+                log_msg,
+                self.zid()
+            );
+            return Permission::Deny;
+        }
         let policy_enforcer = self.policy_enforcer();
         let authn_ids = self.authn_ids();
         let zid = self.zid();
@@ -1041,6 +1116,14 @@ impl AclActionMethods for EgressAclEnforcer {
     fn authn_ids(&self) -> &Vec<AuthSubject> {
         &self.subject
     }
+
+    fn authenticated_permissions(&self) -> &[AuthenticatedPermission] {
+        &self.authenticated_permissions
+    }
+
+    fn deny_all_authenticated_permissions(&self) -> bool {
+        self.deny_all_authenticated_permissions
+    }
 }
 
 impl AclActionMethods for IngressAclEnforcer {
@@ -1058,5 +1141,43 @@ impl AclActionMethods for IngressAclEnforcer {
 
     fn authn_ids(&self) -> &Vec<AuthSubject> {
         &self.subject
+    }
+
+    fn authenticated_permissions(&self) -> &[AuthenticatedPermission] {
+        &self.authenticated_permissions
+    }
+
+    fn deny_all_authenticated_permissions(&self) -> bool {
+        self.deny_all_authenticated_permissions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_permissions_are_action_and_keyexpr_scoped() {
+        let tenant = AuthenticatedPermission::parse("*", "adamo/example/**".into()).unwrap();
+        assert!(tenant.allows(AclMessage::Put, keyexpr::new("adamo/example/robot/video").unwrap()));
+        assert!(tenant.allows(
+            AclMessage::DeclareSubscriber,
+            keyexpr::new("adamo/example/robot/video").unwrap()
+        ));
+        assert!(!tenant.allows(AclMessage::Put, keyexpr::new("adamo/other/robot/video").unwrap()));
+
+        let time_ping =
+            AuthenticatedPermission::parse("put", "adamo/_time/ping/*".into()).unwrap();
+        assert!(time_ping.allows(AclMessage::Put, keyexpr::new("adamo/_time/ping/client").unwrap()));
+        assert!(!time_ping.allows(
+            AclMessage::DeclareSubscriber,
+            keyexpr::new("adamo/_time/ping/client").unwrap()
+        ));
+        assert!(!time_ping.allows(AclMessage::Put, keyexpr::new("adamo/_time/pong/client").unwrap()));
+    }
+
+    #[test]
+    fn authenticated_permission_parser_rejects_unknown_actions() {
+        assert!(AuthenticatedPermission::parse("publish_everything", "adamo/**".into()).is_err());
     }
 }

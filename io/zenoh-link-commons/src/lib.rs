@@ -55,6 +55,12 @@ pub const TCP_SO_RCV_BUF: &str = "so_rcvbuf";
 pub const DSCP: &str = "dscp";
 
 #[derive(Clone, Debug, Serialize, Hash, PartialEq, Eq)]
+pub struct LinkKeyExprPermission {
+    pub action: String,
+    pub keyexpr: String,
+}
+
+#[derive(Clone, Debug, Serialize, Hash, PartialEq, Eq)]
 pub struct Link {
     pub src: Locator,
     pub dst: Locator,
@@ -63,6 +69,7 @@ pub struct Link {
     pub is_streamed: bool,
     pub interfaces: Vec<String>,
     pub auth_identifier: LinkAuthId,
+    pub authenticated_permissions: Vec<LinkKeyExprPermission>,
     pub priorities: Option<PriorityRange>,
     pub reliability: Option<Reliability>,
 }
@@ -98,6 +105,7 @@ impl Link {
             is_streamed: link.is_streamed(),
             interfaces: link.get_interface_names(),
             auth_identifier: link.get_auth_id().clone(),
+            authenticated_permissions: link.get_authenticated_permissions().to_vec(),
             priorities,
             reliability,
         }
@@ -112,6 +120,7 @@ impl Link {
             is_streamed: false,
             interfaces: vec![],
             auth_identifier: link.get_auth_id().clone(),
+            authenticated_permissions: vec![],
             priorities: None,
             reliability: None,
         }

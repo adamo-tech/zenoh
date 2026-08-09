@@ -42,6 +42,7 @@ default = [
   "transport_tls",
   "transport_udp",
   "transport_unixsock-stream",
+  "transport_webtransport",
   "transport_ws",
 ]
 internal = [

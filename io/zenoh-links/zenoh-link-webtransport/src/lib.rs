@@ -28,6 +28,8 @@ pub use zenoh_link_commons::quic::TlsConfigurator as WebTransportConfigurator;
 pub const WEBTRANSPORT_LOCATOR_PREFIX: &str = "webtransport";
 pub const WEBTRANSPORT_PATH_CONFIG: &str = "path";
 pub const WEBTRANSPORT_SERVER_CERTIFICATE_HASH_CONFIG: &str = "server_certificate_hash";
+pub const WEBTRANSPORT_JWT_PUBLIC_KEY_FILE_CONFIG: &str = "jwt_public_key_file";
+pub const WEBTRANSPORT_JWT_AUDIENCE_CONFIG: &str = "jwt_audience";
 pub const WEBTRANSPORT_DEFAULT_PATH: &str = "/zenoh";
 
 const IS_RELIABLE: bool = true;
