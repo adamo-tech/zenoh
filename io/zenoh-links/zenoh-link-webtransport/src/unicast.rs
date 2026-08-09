@@ -794,6 +794,67 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn listener_takes_ownership_of_the_prebound_socket() {
+        let identity = Identity::self_signed(["localhost", "127.0.0.1"]).unwrap();
+        let test_dir = std::env::temp_dir().join(format!(
+            "zenoh-webtransport-prebound-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&test_dir).unwrap();
+        let cert_file = test_dir.join("certificate.pem");
+        let key_file = test_dir.join("private-key.pem");
+        identity
+            .certificate_chain()
+            .store_pemfile(&cert_file)
+            .await
+            .unwrap();
+        identity
+            .private_key()
+            .store_secret_pemfile(&key_file)
+            .await
+            .unwrap();
+
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = register_prebound_server_socket(socket).unwrap();
+        let (accepted_tx, _accepted_rx) = flume::bounded(1);
+        let listener_manager = LinkManagerUnicastWebTransport::new(accepted_tx);
+        let listen_config = format!(
+            "{}={};{}={}",
+            TLS_LISTEN_CERTIFICATE_FILE,
+            cert_file.display(),
+            TLS_LISTEN_PRIVATE_KEY_FILE,
+            key_file.display()
+        );
+        let endpoint = EndPoint::new(
+            WEBTRANSPORT_LOCATOR_PREFIX,
+            address.to_string(),
+            "",
+            listen_config.clone(),
+        )
+        .unwrap();
+        let locator = listener_manager.new_listener(endpoint).await.unwrap();
+
+        assert_eq!(locator.address().as_str(), address.to_string());
+        assert!(!unregister_prebound_server_socket(address));
+
+        let actual_listener = EndPoint::new(
+            WEBTRANSPORT_LOCATOR_PREFIX,
+            locator.address(),
+            "",
+            listen_config,
+        )
+        .unwrap();
+        listener_manager.del_listener(&actual_listener).await.unwrap();
+        std::fs::remove_file(cert_file).unwrap();
+        std::fs::remove_file(key_file).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn reliable_stream_round_trip() {
         let identity = Identity::self_signed(["localhost", "127.0.0.1"]).unwrap();
         let hash = identity.certificate_chain().as_slice()[0]
