@@ -164,6 +164,7 @@ serde = { version = "1.0.225", default-features = false, features = [
   "derive",
 ] } # Default features are disabled due to usage in no_std crates
 serde_json = "1.0.145"
+jsonwebtoken = "9.3.1"
 serde_with = "3.14.1"
 serde_yaml = "0.9.34"
 sha3 = "0.10.8"
