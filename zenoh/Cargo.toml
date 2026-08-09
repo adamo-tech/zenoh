@@ -84,6 +84,7 @@ unstable = [
 ]
 
 [dependencies]
+adamo-authorization = { path = "../adamo-authorization" }
 ahash = { workspace = true, default-features = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }

@@ -21,7 +21,10 @@ use zenoh_util::LibSearchDirs;
 const GIT_VERSION: &str = git_version!(prefix = "v", cargo_prefix = "v");
 
 lazy_static::lazy_static!(
-    static ref LONG_VERSION: String = format!("{} built with {}", GIT_VERSION, env!("RUSTC_VERSION"));
+    static ref LONG_VERSION: String = format!(
+        "{} (zenoh-build 1.9.0-adamo.3+native-auth.priority.551084b758ce.reorder.b7e595308) built with {}",
+        GIT_VERSION, env!("RUSTC_VERSION")
+    );
 );
 
 #[derive(Debug, Parser)]
