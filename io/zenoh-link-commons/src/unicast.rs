@@ -27,6 +27,8 @@ use zenoh_protocol::{
 };
 use zenoh_result::ZResult;
 
+use super::LinkKeyExprPermission;
+
 pub type LinkManagerUnicast = Arc<dyn LinkManagerUnicastTrait>;
 #[async_trait]
 pub trait LinkManagerUnicastTrait: Send + Sync {
@@ -63,6 +65,11 @@ pub trait LinkUnicastTrait: Send + Sync {
     fn is_streamed(&self) -> bool;
     fn get_interface_names(&self) -> Vec<String>;
     fn get_auth_id(&self) -> &LinkAuthId;
+    /// Action and key-expression permissions authenticated before this link was
+    /// accepted. Empty means that the link itself does not impose a scope.
+    fn get_authenticated_permissions(&self) -> &[LinkKeyExprPermission] {
+        &[]
+    }
     fn supports_priorities(&self) -> bool {
         false
     }

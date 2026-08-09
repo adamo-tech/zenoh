@@ -13,11 +13,13 @@ use std::{
     fmt,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use serde::Deserialize;
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -30,7 +32,8 @@ use zenoh_core::{zasynclock, zasyncread, zasyncwrite};
 use zenoh_link_commons::{
     get_ip_interface_names,
     tls::config::{TLS_LISTEN_CERTIFICATE_FILE, TLS_LISTEN_PRIVATE_KEY_FILE},
-    LinkAuthId, LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait, NewLinkChannelSender,
+    LinkAuthId, LinkKeyExprPermission, LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait,
+    NewLinkChannelSender,
 };
 use zenoh_protocol::{
     core::{EndPoint, Locator, Priority},
@@ -41,8 +44,132 @@ use zenoh_result::{bail, zerror, ZResult};
 use super::{
     WEBTRANSPORT_DEFAULT_MTU, WEBTRANSPORT_DEFAULT_PATH, WEBTRANSPORT_LOCATOR_PREFIX,
     WEBTRANSPORT_PATH_CONFIG,
+    WEBTRANSPORT_JWT_AUDIENCE_CONFIG, WEBTRANSPORT_JWT_PUBLIC_KEY_FILE_CONFIG,
     WEBTRANSPORT_SERVER_CERTIFICATE_HASH_CONFIG,
 };
+
+static PREBOUND_SERVER_SOCKETS: LazyLock<Mutex<HashMap<SocketAddr, std::net::UdpSocket>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Register a UDP socket for the next WebTransport listener created on its
+/// local address. This lets reachability/STUN code warm the exact socket that
+/// the Zenoh link subsequently owns, preserving the advertised NAT mapping.
+pub fn register_prebound_server_socket(socket: std::net::UdpSocket) -> ZResult<SocketAddr> {
+    socket.set_nonblocking(true).map_err(|error| {
+        zerror!("Can not make pre-bound WebTransport socket nonblocking: {error}")
+    })?;
+    let address = socket.local_addr().map_err(|error| {
+        zerror!("Can not inspect pre-bound WebTransport socket: {error}")
+    })?;
+    let mut sockets = PREBOUND_SERVER_SOCKETS
+        .lock()
+        .map_err(|_| zerror!("Pre-bound WebTransport socket registry is poisoned"))?;
+    if sockets.insert(address, socket).is_some() {
+        bail!("A pre-bound WebTransport socket is already registered for {address}");
+    }
+    Ok(address)
+}
+
+fn take_prebound_server_socket(address: SocketAddr) -> ZResult<Option<std::net::UdpSocket>> {
+    Ok(PREBOUND_SERVER_SOCKETS
+        .lock()
+        .map_err(|_| zerror!("Pre-bound WebTransport socket registry is poisoned"))?
+        .remove(&address))
+}
+
+#[derive(Debug, Deserialize)]
+struct WebTransportJwtClaims {
+    sub: String,
+    scope: String,
+}
+
+struct WebTransportJwtVerifier {
+    key: DecodingKey,
+    validation: Validation,
+}
+
+impl WebTransportJwtVerifier {
+    async fn from_endpoint(endpoint: &EndPoint) -> ZResult<Option<Self>> {
+        let key_file = endpoint.config().get(WEBTRANSPORT_JWT_PUBLIC_KEY_FILE_CONFIG);
+        let audience = endpoint.config().get(WEBTRANSPORT_JWT_AUDIENCE_CONFIG);
+        match (key_file, audience) {
+            (None, None) => Ok(None),
+            (Some(_), None) | (None, Some(_)) => bail!(
+                "WebTransport listener JWT auth requires both '{}' and '{}'",
+                WEBTRANSPORT_JWT_PUBLIC_KEY_FILE_CONFIG,
+                WEBTRANSPORT_JWT_AUDIENCE_CONFIG
+            ),
+            (Some(key_file), Some(audience)) => {
+                let pem = tokio::fs::read(key_file).await.map_err(|e| {
+                    zerror!("Can not read WebTransport JWT public key '{}': {}", key_file, e)
+                })?;
+                let key = DecodingKey::from_ec_pem(&pem).map_err(|e| {
+                    zerror!("Can not parse WebTransport JWT EC public key '{}': {}", key_file, e)
+                })?;
+                let mut validation = Validation::new(Algorithm::ES256);
+                validation.set_audience(&[audience]);
+                validation.set_required_spec_claims(&["exp", "sub", "aud"]);
+                Ok(Some(Self { key, validation }))
+            }
+        }
+    }
+
+    fn authorize(&self, request_path: &str) -> ZResult<(String, Vec<LinkKeyExprPermission>)> {
+        let token = request_path
+            .split_once('?')
+            .map(|(_, query)| query)
+            .and_then(|query| {
+                url::form_urlencoded::parse(query.as_bytes())
+                    .find_map(|(key, value)| (key == "token").then(|| value.into_owned()))
+            })
+            .ok_or_else(|| zerror!("WebTransport request is missing its bearer token"))?;
+        let claims = jsonwebtoken::decode::<WebTransportJwtClaims>(&token, &self.key, &self.validation)
+            .map_err(|e| zerror!("WebTransport bearer token is invalid: {}", e))?
+            .claims;
+        let permissions = claims
+            .scope
+            .split_ascii_whitespace()
+            .map(|scope| {
+                let value = scope.strip_prefix("zenoh:").ok_or_else(|| {
+                    zerror!("WebTransport bearer token contains unsupported scope '{}'", scope)
+                })?;
+                let (action, keyexpr) = value.split_once(':').ok_or_else(|| {
+                    zerror!("WebTransport bearer token contains malformed Zenoh scope '{}'", scope)
+                })?;
+                if !matches!(
+                    action,
+                    "*"
+                        | "put"
+                        | "delete"
+                        | "declare_subscriber"
+                        | "query"
+                        | "declare_queryable"
+                        | "reply"
+                        | "liveliness_token"
+                        | "declare_liveliness_subscriber"
+                        | "liveliness_query"
+                ) {
+                    bail!("WebTransport bearer token contains unknown Zenoh action '{}'", action);
+                }
+                zenoh_keyexpr::keyexpr::new(keyexpr).map_err(|e| {
+                    zerror!(
+                        "WebTransport bearer token contains invalid key-expression '{}': {}",
+                        keyexpr,
+                        e
+                    )
+                })?;
+                Ok(LinkKeyExprPermission {
+                    action: action.to_owned(),
+                    keyexpr: keyexpr.to_owned(),
+                })
+            })
+            .collect::<ZResult<Vec<_>>>()?;
+        if claims.sub.is_empty() || permissions.is_empty() {
+            bail!("WebTransport bearer token has no subject or Zenoh permissions");
+        }
+        Ok((claims.sub, permissions))
+    }
+}
 
 pub struct LinkUnicastWebTransport {
     // A wtransport client connection is owned by its endpoint. Keep the
@@ -55,6 +182,8 @@ pub struct LinkUnicastWebTransport {
     src_locator: Locator,
     dst_addr: SocketAddr,
     dst_locator: Locator,
+    auth_id: LinkAuthId,
+    authenticated_permissions: Vec<LinkKeyExprPermission>,
 }
 
 impl LinkUnicastWebTransport {
@@ -65,6 +194,8 @@ impl LinkUnicastWebTransport {
         recv: wtransport::stream::RecvStream,
         src_addr: SocketAddr,
         dst_addr: SocketAddr,
+        auth_id: LinkAuthId,
+        authenticated_permissions: Vec<LinkKeyExprPermission>,
     ) -> Self {
         Self {
             _client_endpoint: client_endpoint,
@@ -85,6 +216,8 @@ impl LinkUnicastWebTransport {
                 "",
             )
             .unwrap(),
+            auth_id,
+            authenticated_permissions,
         }
     }
 }
@@ -154,7 +287,11 @@ impl LinkUnicastTrait for LinkUnicastWebTransport {
     }
 
     fn get_auth_id(&self) -> &LinkAuthId {
-        &LinkAuthId::WebTransport(None)
+        &self.auth_id
+    }
+
+    fn get_authenticated_permissions(&self) -> &[LinkKeyExprPermission] {
+        &self.authenticated_permissions
     }
 }
 
@@ -256,6 +393,8 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
             recv,
             src_addr,
             dst_addr,
+            LinkAuthId::WebTransport(None),
+            Vec::new(),
         ));
         Ok(LinkUnicast::from(link))
     }
@@ -283,11 +422,18 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
                 )
             })?;
         let path = endpoint_path(&endpoint)?.to_owned();
+        let jwt_verifier = WebTransportJwtVerifier::from_endpoint(&endpoint)
+            .await?
+            .map(Arc::new);
         let identity = Identity::load_pemfiles(cert_file, key_file)
             .await
             .map_err(|e| zerror!("Can not load WebTransport listener identity: {}", e))?;
-        let config = ServerConfig::builder()
-            .with_bind_address(addr)
+        let config_builder = ServerConfig::builder();
+        let config_builder = match take_prebound_server_socket(addr)? {
+            Some(socket) => config_builder.with_bind_socket(socket),
+            None => config_builder.with_bind_address(addr),
+        };
+        let config = config_builder
             .with_identity(identity)
             .keep_alive_interval(Some(Duration::from_secs(3)))
             .build();
@@ -311,7 +457,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
             let manager = self.manager.clone();
             let listeners = self.listeners.clone();
             async move {
-                let result = accept_task(server, local_addr, path, token, manager).await;
+                let result = accept_task(server, local_addr, path, jwt_verifier, token, manager).await;
                 zasyncwrite!(listeners).remove(&local_addr);
                 result
             }
@@ -378,6 +524,7 @@ async fn accept_task(
     server: Endpoint<wtransport::endpoint::endpoint_side::Server>,
     local_addr: SocketAddr,
     path: String,
+    jwt_verifier: Option<Arc<WebTransportJwtVerifier>>,
     token: CancellationToken,
     manager: NewLinkChannelSender,
 ) -> ZResult<()> {
@@ -391,8 +538,9 @@ async fn accept_task(
         };
         let manager = manager.clone();
         let path = path.clone();
+        let jwt_verifier = jwt_verifier.clone();
         zenoh_runtime::ZRuntime::Acceptor.spawn(async move {
-            if let Err(e) = accept_one(incoming, local_addr, &path, manager).await {
+            if let Err(e) = accept_one(incoming, local_addr, &path, jwt_verifier.as_deref(), manager).await {
                 tracing::warn!("WebTransport connection was not accepted: {}", e);
             }
         });
@@ -404,6 +552,7 @@ async fn accept_one(
     incoming: IncomingSession,
     local_addr: SocketAddr,
     path: &str,
+    jwt_verifier: Option<&WebTransportJwtVerifier>,
     manager: NewLinkChannelSender,
 ) -> ZResult<()> {
     let request = incoming
@@ -423,6 +572,17 @@ async fn accept_one(
             path
         );
     }
+    let (auth_id, authenticated_permissions) = if let Some(verifier) = jwt_verifier {
+        match verifier.authorize(request.path()) {
+            Ok((subject, scopes)) => (LinkAuthId::WebTransport(Some(subject)), scopes),
+            Err(error) => {
+                request.forbidden().await;
+                return Err(error);
+            }
+        }
+    } else {
+        (LinkAuthId::WebTransport(None), Vec::new())
+    };
     let dst_addr = request.remote_address();
     let connection = request
         .accept()
@@ -442,6 +602,8 @@ async fn accept_one(
         recv,
         local_addr,
         dst_addr,
+        auth_id,
+        authenticated_permissions,
     ));
     manager
         .send_async(LinkUnicast::from(link))
@@ -479,7 +641,148 @@ async fn resolve_addr(endpoint: &EndPoint) -> ZResult<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use rcgen::KeyPair;
+    use serde::Serialize;
     use wtransport::tls::Sha256DigestFmt;
+
+    #[derive(Serialize)]
+    struct TestClaims {
+        sub: &'static str,
+        scope: &'static str,
+        aud: &'static str,
+        exp: usize,
+    }
+
+    #[test]
+    fn jwt_authorization_extracts_validated_zenoh_permissions() {
+        let pair = KeyPair::generate().unwrap();
+        let key = EncodingKey::from_ec_pem(pair.serialize_pem().as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::ES256);
+        validation.set_audience(&["zenoh-webtransport"]);
+        validation.set_required_spec_claims(&["exp", "sub", "aud"]);
+        let verifier = WebTransportJwtVerifier {
+            key: DecodingKey::from_ec_pem(pair.public_key_pem().as_bytes()).unwrap(),
+            validation,
+        };
+        let token = encode(
+            &Header::new(Algorithm::ES256),
+            &TestClaims {
+                sub: "operator-1",
+                scope: "zenoh:*:adamo/example/** zenoh:put:adamo/_time/ping/*",
+                aud: "zenoh-webtransport",
+                exp: 9_999_999_999,
+            },
+            &key,
+        )
+        .unwrap();
+
+        let (subject, permissions) = verifier
+            .authorize(&format!("/zenoh?token={token}"))
+            .unwrap();
+        assert_eq!(subject, "operator-1");
+        assert_eq!(permissions[0].action, "*");
+        assert_eq!(permissions[0].keyexpr, "adamo/example/**");
+        assert_eq!(permissions[1].action, "put");
+        assert_eq!(permissions[1].keyexpr, "adamo/_time/ping/*");
+        assert!(verifier.authorize("/zenoh").is_err());
+        assert!(verifier.authorize("/zenoh?token=not-a-jwt").is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listener_authenticates_before_delivering_the_link() {
+        let identity = Identity::self_signed(["localhost", "127.0.0.1"]).unwrap();
+        let digest = identity.certificate_chain().as_slice()[0].hash();
+        let jwt_pair = KeyPair::generate().unwrap();
+        let jwt_key = EncodingKey::from_ec_pem(jwt_pair.serialize_pem().as_bytes()).unwrap();
+        let token = encode(
+            &Header::new(Algorithm::ES256),
+            &TestClaims {
+                sub: "operator-1",
+                scope: "zenoh:*:adamo/example/** zenoh:put:adamo/_time/ping/*",
+                aud: "p2p",
+                exp: 9_999_999_999,
+            },
+            &jwt_key,
+        )
+        .unwrap();
+        let test_dir = std::env::temp_dir().join(format!(
+            "zenoh-webtransport-auth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&test_dir).unwrap();
+        let cert_file = test_dir.join("certificate.pem");
+        let key_file = test_dir.join("private-key.pem");
+        let jwt_file = test_dir.join("jwt-public.pem");
+        identity
+            .certificate_chain()
+            .store_pemfile(&cert_file)
+            .await
+            .unwrap();
+        identity
+            .private_key()
+            .store_secret_pemfile(&key_file)
+            .await
+            .unwrap();
+        std::fs::write(&jwt_file, jwt_pair.public_key_pem()).unwrap();
+
+        let (accepted_tx, accepted_rx) = flume::bounded(1);
+        let listener_manager = LinkManagerUnicastWebTransport::new(accepted_tx);
+        let listen_config = format!(
+            "{}={};{}={};{}={};{}=p2p",
+            TLS_LISTEN_CERTIFICATE_FILE,
+            cert_file.display(),
+            TLS_LISTEN_PRIVATE_KEY_FILE,
+            key_file.display(),
+            WEBTRANSPORT_JWT_PUBLIC_KEY_FILE_CONFIG,
+            jwt_file.display(),
+            WEBTRANSPORT_JWT_AUDIENCE_CONFIG,
+        );
+        let listen_endpoint = EndPoint::new(
+            WEBTRANSPORT_LOCATOR_PREFIX,
+            "127.0.0.1:0",
+            "",
+            listen_config.clone(),
+        )
+        .unwrap();
+        let locator = listener_manager.new_listener(listen_endpoint).await.unwrap();
+        let client = Endpoint::client(
+            ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([digest])
+                .build(),
+        )
+        .unwrap();
+        let connection = client
+            .connect(&format!("https://{}/zenoh?token={token}", locator.address()))
+            .await
+            .unwrap();
+        let _stream = connection.open_bi().await.unwrap().await.unwrap();
+        let accepted = accepted_rx.recv_async().await.unwrap();
+        assert_eq!(
+            accepted.get_auth_id(),
+            &LinkAuthId::WebTransport(Some("operator-1".into()))
+        );
+        assert_eq!(accepted.get_authenticated_permissions().len(), 2);
+        assert_eq!(accepted.get_authenticated_permissions()[1].action, "put");
+
+        let actual_listener = EndPoint::new(
+            WEBTRANSPORT_LOCATOR_PREFIX,
+            locator.address(),
+            "",
+            listen_config,
+        )
+        .unwrap();
+        listener_manager.del_listener(&actual_listener).await.unwrap();
+        std::fs::remove_file(cert_file).unwrap();
+        std::fs::remove_file(key_file).unwrap();
+        std::fs::remove_file(jwt_file).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reliable_stream_round_trip() {
