@@ -313,6 +313,88 @@ async fn run_closed(
     }
 }
 
+/// Open-loop driver: fires `args.batch` messages every `batch / rate` seconds,
+/// regardless of how long acks take. Latency is measured from the tick's
+/// *scheduled* send time (not `Instant::now()` at send time), so any
+/// send-side backlog caused by falling behind the offered rate is captured
+/// in the RTT rather than hidden (avoids coordinated omission).
+async fn run_open(
+    sender: Sender,
+    args: &Args,
+    ack_rx: mpsc::UnboundedReceiver<(u64, u64)>,
+    ack_tx: mpsc::UnboundedSender<(u64, u64)>,
+    epoch: Instant,
+    measure_start: Instant,
+) -> RunResult {
+    let rate = args.rate.unwrap();
+    let period = Duration::from_secs_f64(args.batch as f64 / rate);
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+
+    // Open loop has no send-side backpressure, so the collector's semaphore
+    // is unused (permits accumulate but nothing ever acquires them).
+    let sem = Arc::new(Semaphore::new(0));
+    let (first_measured_tx, first_measured_rx) = watch::channel(u64::MAX);
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let (result_tx, result_rx) = oneshot::channel::<(Stats, u64)>();
+
+    tokio::spawn(collector(
+        ack_rx,
+        sem,
+        first_measured_rx,
+        stop_rx,
+        result_tx,
+    ));
+
+    let warmup_end = measure_start + Duration::from_secs_f64(args.warmup);
+    let run_end = warmup_end + Duration::from_secs_f64(args.duration);
+    let mut seq: u64 = 0;
+    let mut tick_index: u64 = 0;
+    let mut first_measured: u64 = u64::MAX;
+    let mut sent_measured: u64 = 0;
+
+    loop {
+        interval.tick().await;
+        // f64 form to avoid overflowing `Duration * u32` on long runs.
+        let scheduled =
+            measure_start + Duration::from_secs_f64(tick_index as f64 * period.as_secs_f64());
+        tick_index += 1;
+        if scheduled >= run_end {
+            break;
+        }
+        if first_measured == u64::MAX && scheduled >= warmup_end {
+            first_measured = seq;
+            let _ = first_measured_tx.send(first_measured);
+        }
+        let scheduled_nanos = scheduled.saturating_duration_since(epoch).as_nanos() as u64;
+        for _ in 0..args.batch {
+            sender.send(args, seq, scheduled_nanos, &ack_tx, epoch).await;
+            if first_measured != u64::MAX {
+                sent_measured += 1;
+            }
+            seq += 1;
+        }
+    }
+
+    let elapsed = if first_measured == u64::MAX {
+        Duration::from_secs(0)
+    } else {
+        Instant::now().saturating_duration_since(warmup_end)
+    };
+
+    // Signal the collector to enter its grace period, then wait for the final tally.
+    let _ = stop_tx.send(());
+    let (stats, acked_measured) = result_rx.await.unwrap_or_else(|_| (Stats::new(), 0));
+
+    RunResult {
+        sent_measured,
+        acked_measured,
+        elapsed,
+        stats,
+        offered_rate: Some(rate),
+    }
+}
+
 fn report(args: &Args, result: &RunResult) {
     let elapsed_s = result.elapsed.as_secs_f64();
     let achieved_rate = if elapsed_s > 0.0 {
@@ -332,7 +414,12 @@ fn report(args: &Args, result: &RunResult) {
         loss,
     );
     if let Some(rate) = result.offered_rate {
-        println!("offered rate: {rate:.1} msg/s");
+        println!("offered {rate:.1} msg/s, achieved {achieved_rate:.1} msg/s");
+        if achieved_rate < 0.99 * rate {
+            eprintln!(
+                "warning: achieved rate {achieved_rate:.1} msg/s is below 99% of offered {rate:.1} msg/s"
+            );
+        }
     }
     println!("{}", result.stats.summary());
 
@@ -420,7 +507,7 @@ async fn main() {
 
     let result = match args.load {
         Load::Closed => run_closed(sender, &args, ack_rx, ack_tx, epoch, measure_start).await,
-        Load::Open => unimplemented!("open loop lands in the next commit"),
+        Load::Open => run_open(sender, &args, ack_rx, ack_tx, epoch, measure_start).await,
     };
 
     report(&args, &result);
