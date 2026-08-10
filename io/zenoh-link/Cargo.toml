@@ -50,6 +50,7 @@ uring = [
   "zenoh-link-unixpipe/uring",
   "zenoh-link-unixsock_stream/uring",
   "zenoh-link-vsock/uring",
+  "zenoh-link-webtransport/uring",
   "zenoh-link-ws/uring",
 ]
 

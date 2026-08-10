@@ -53,4 +53,3 @@ zenoh-link-commons = { workspace = true, features = ["quic"] }
 zenoh-protocol = { workspace = true }
 zenoh-result = { workspace = true }
 zenoh-runtime = { workspace = true }
-zenoh-util = { workspace = true }

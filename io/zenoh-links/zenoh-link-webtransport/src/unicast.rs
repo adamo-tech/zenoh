@@ -200,14 +200,12 @@ impl fmt::Debug for LinkUnicastWebTransport {
 /*************************************/
 /*            MANAGER                */
 /*************************************/
-#[allow(dead_code)]
 struct ListenerUnicastWebTransport {
     endpoint: EndPoint,
     token: CancellationToken,
     handle: JoinHandle<ZResult<()>>,
 }
 
-#[allow(dead_code)]
 pub struct LinkManagerUnicastWebTransport {
     manager: NewLinkChannelSender,
     listeners: Arc<AsyncRwLock<HashMap<SocketAddr, ListenerUnicastWebTransport>>>,
