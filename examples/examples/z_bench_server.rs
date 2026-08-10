@@ -59,7 +59,9 @@ async fn main() {
                 if let Some((seq, ts)) = decode_header(&payload) {
                     let mut ack = [0u8; HEADER_LEN];
                     encode_header(&mut ack, seq, ts);
-                    publisher.put(&ack[..]).await.unwrap();
+                    publisher.put(&ack[..]).await.unwrap_or_else(|e| {
+                        eprintln!(">> [Pubsub] Error sending ack: {e}");
+                    });
                     received += 1;
                     bytes += payload.len() as u64;
                     if received % 100_000 == 0 {
@@ -82,7 +84,9 @@ async fn main() {
                     query
                         .reply(query.key_expr().clone(), &ack[..])
                         .await
-                        .unwrap();
+                        .unwrap_or_else(|e| {
+                            eprintln!(">> [Query] Error sending reply: {e}");
+                        });
                 }
             }
         }
