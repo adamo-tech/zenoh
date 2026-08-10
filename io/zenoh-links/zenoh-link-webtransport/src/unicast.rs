@@ -19,6 +19,7 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -26,18 +27,20 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock as AsyncRwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use web_transport_quinn::{RecvStream, SendStream, Session, ALPN};
-use zenoh_core::zasynclock;
+use web_transport_quinn::{RecvStream, Request, SendStream, Session, ALPN};
+use zenoh_core::{zasynclock, zasyncread, zasyncwrite};
 use zenoh_link_commons::{
     get_ip_interface_names,
-    quic::{get_quic_addr, get_quic_host, TlsClientConfig},
+    quic::{get_quic_addr, get_quic_host, TlsClientConfig, TlsServerConfig},
     LinkAuthId, LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait, NewLinkChannelSender,
 };
 use zenoh_protocol::{
     core::{EndPoint, Locator, Priority},
     transport::BatchSize,
 };
-use zenoh_result::{bail, zerror, ZResult};
+#[cfg(all(feature = "uring", target_os = "linux"))]
+use zenoh_result::bail;
+use zenoh_result::{zerror, ZResult};
 
 use super::{WEBTRANSPORT_DEFAULT_MTU, WEBTRANSPORT_LOCATOR_PREFIX};
 
@@ -292,19 +295,157 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
         Ok(LinkUnicast::from(link as Arc<dyn LinkUnicastTrait>))
     }
 
-    async fn new_listener(&self, _endpoint: EndPoint) -> ZResult<Locator> {
-        bail!("not implemented yet: Task 5")
+    async fn new_listener(&self, mut endpoint: EndPoint) -> ZResult<Locator> {
+        let epaddr = endpoint.address();
+        let epconf = endpoint.config();
+
+        let addr = get_quic_addr(&epaddr).await?;
+
+        let server_crypto = TlsServerConfig::new(&epconf, true)
+            .await
+            .map_err(|e| zerror!("Cannot create a new WebTransport listener on {addr}: {e}"))?;
+        let mut rustls_config = server_crypto.server_config;
+        rustls_config.alpn_protocols = vec![ALPN.as_bytes().to_vec()];
+
+        let quic_server_config =
+            quinn::crypto::rustls::QuicServerConfig::try_from(rustls_config)
+                .map_err(|e| zerror!("Cannot create a new WebTransport listener on {addr}: {e}"))?;
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
+
+        let quic_endpoint = quinn::Endpoint::server(server_config, addr)
+            .map_err(|e| zerror!("Cannot create a new WebTransport listener on {addr}: {e}"))?;
+        let local_addr = quic_endpoint
+            .local_addr()
+            .map_err(|e| zerror!("Cannot create a new WebTransport listener on {addr}: {e}"))?;
+
+        // Update the endpoint locator address
+        endpoint = EndPoint::new(
+            endpoint.protocol(),
+            local_addr.to_string(),
+            endpoint.metadata(),
+            endpoint.config(),
+        )?;
+
+        let token = CancellationToken::new();
+        let task = {
+            let token = token.clone();
+            let manager = self.manager.clone();
+            let listeners = self.listeners.clone();
+
+            async move {
+                let res = accept_task(quic_endpoint, token, manager).await;
+                zasyncwrite!(listeners).remove(&local_addr);
+                res
+            }
+        };
+        let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(task);
+
+        let locator = endpoint.to_locator();
+        let listener = ListenerUnicastWebTransport {
+            endpoint,
+            token,
+            handle,
+        };
+        zasyncwrite!(self.listeners).insert(local_addr, listener);
+
+        Ok(locator)
     }
 
-    async fn del_listener(&self, _endpoint: &EndPoint) -> ZResult<()> {
-        bail!("not implemented yet: Task 5")
+    async fn del_listener(&self, endpoint: &EndPoint) -> ZResult<()> {
+        let epaddr = endpoint.address();
+        let addr = get_quic_addr(&epaddr).await?;
+
+        let listener = zasyncwrite!(self.listeners).remove(&addr).ok_or_else(|| {
+            zerror!("Cannot delete the WebTransport listener because it has not been found: {addr}")
+        })?;
+
+        listener.token.cancel();
+        listener.handle.await?
     }
 
     async fn get_listeners(&self) -> Vec<EndPoint> {
-        Vec::new()
+        zasyncread!(self.listeners)
+            .values()
+            .map(|l| l.endpoint.clone())
+            .collect()
     }
 
     async fn get_locators(&self) -> Vec<Locator> {
-        Vec::new()
+        zasyncread!(self.listeners)
+            .values()
+            .map(|l| l.endpoint.to_locator())
+            .collect()
     }
+}
+
+async fn accept_task(
+    quic_endpoint: quinn::Endpoint,
+    token: CancellationToken,
+    manager: NewLinkChannelSender,
+) -> ZResult<()> {
+    let src_addr = quic_endpoint
+        .local_addr()
+        .map_err(|e| zerror!("Cannot accept WebTransport connections: {e}"))?;
+
+    tracing::trace!("Ready to accept WebTransport connections on: {src_addr:?}");
+    loop {
+        tokio::select! {
+            incoming = quic_endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                let manager = manager.clone();
+                // Handshake each connection in its own task so a slow peer
+                // cannot stall the accept loop.
+                zenoh_runtime::ZRuntime::Acceptor.spawn(async move {
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        webtransport_handshake(incoming, src_addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(link)) => {
+                            if let Err(e) = manager.send_async(link).await {
+                                tracing::error!("{}-{}: {}", file!(), line!(), e)
+                            }
+                        }
+                        Ok(Err(e)) => tracing::debug!("WebTransport handshake failed: {e}"),
+                        Err(_) => tracing::debug!("WebTransport handshake timed out"),
+                    }
+                });
+            }
+            _ = token.cancelled() => break,
+        }
+    }
+    Ok(())
+}
+
+async fn webtransport_handshake(
+    incoming: quinn::Incoming,
+    src_addr: SocketAddr,
+) -> ZResult<LinkUnicast> {
+    let conn = incoming
+        .await
+        .map_err(|e| zerror!("QUIC accept failed on {src_addr}: {e}"))?;
+    let dst_addr = conn.remote_address();
+
+    // H3 SETTINGS + Extended CONNECT (any path is accepted).
+    let request = Request::accept(conn)
+        .await
+        .map_err(|e| zerror!("WebTransport CONNECT failed from {dst_addr}: {e}"))?;
+    let session = request
+        .ok()
+        .await
+        .map_err(|e| zerror!("WebTransport session setup failed from {dst_addr}: {e}"))?;
+
+    // The connecting side opens the bidi stream; it resolves when the first
+    // bytes of the zenoh handshake arrive.
+    let (send, recv) = session
+        .accept_bi()
+        .await
+        .map_err(|e| zerror!("WebTransport stream accept failed from {dst_addr}: {e}"))?;
+
+    tracing::debug!("Accepted WebTransport connection on {src_addr:?}: {dst_addr:?}");
+    let link = Arc::new(LinkUnicastWebTransport::new(
+        session, send, recv, src_addr, dst_addr,
+    ));
+    Ok(LinkUnicast::from(link as Arc<dyn LinkUnicastTrait>))
 }
