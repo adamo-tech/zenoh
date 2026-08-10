@@ -241,6 +241,7 @@ async fn run_closed(
     ack_rx: mpsc::UnboundedReceiver<(u64, u64)>,
     ack_tx: mpsc::UnboundedSender<(u64, u64)>,
     epoch: Instant,
+    measure_start: Instant,
 ) -> RunResult {
     let sem = Arc::new(Semaphore::new(args.window));
     let (first_measured_tx, first_measured_rx) = watch::channel(u64::MAX);
@@ -257,7 +258,7 @@ async fn run_closed(
 
     let burst = args.batch.min(args.window).max(1);
     let mut seq: u64 = 0;
-    let warmup_end = epoch + Duration::from_secs_f64(args.warmup);
+    let warmup_end = measure_start + Duration::from_secs_f64(args.warmup);
     let run_end = warmup_end + Duration::from_secs_f64(args.duration);
     let mut first_measured: u64 = u64::MAX;
     let mut sent_measured: u64 = 0;
@@ -271,7 +272,17 @@ async fn run_closed(
             first_measured = seq;
             let _ = first_measured_tx.send(first_measured);
         }
-        let permits = sem.clone().acquire_many_owned(burst as u32).await.unwrap();
+        // Bound the acquire on the run deadline: a lost ack permanently
+        // consumes a permit (the collector never sees it to release it
+        // back), so without a deadline a dead server/link can hang here
+        // forever once `window` acks have been lost.
+        let acquired =
+            tokio::time::timeout_at(run_end.into(), sem.clone().acquire_many_owned(burst as u32))
+                .await;
+        let permits = match acquired {
+            Ok(Ok(permits)) => permits,
+            _ => break,
+        };
         permits.forget();
         for _ in 0..burst {
             let ts = epoch.elapsed().as_nanos() as u64;
@@ -327,7 +338,11 @@ fn report(args: &Args, result: &RunResult) {
 
     if let Some(path) = &args.csv {
         let header = "pattern,load,rate,window,batch,size,duration_s,sent,acked,loss,achieved_msgs,achieved_mbs,acked_count,p50_us,p90_us,p99_us,p999_us,max_us";
-        let rate_field = args.rate.map(|r| r.to_string()).unwrap_or_default();
+        let rate_field = if args.load == Load::Open {
+            args.rate.map(|r| r.to_string()).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let window_field = if args.load == Load::Open {
             String::new()
         } else {
@@ -398,8 +413,13 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // `epoch` stays the RTT timestamp origin, but the warmup/run schedule
+    // starts only now: a slow probe (session matching, connection setup —
+    // up to 5s) must not eat into the warmup window.
+    let measure_start = Instant::now();
+
     let result = match args.load {
-        Load::Closed => run_closed(sender, &args, ack_rx, ack_tx, epoch).await,
+        Load::Closed => run_closed(sender, &args, ack_rx, ack_tx, epoch, measure_start).await,
         Load::Open => unimplemented!("open loop lands in the next commit"),
     };
 
