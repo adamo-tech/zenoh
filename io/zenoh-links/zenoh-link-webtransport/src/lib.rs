@@ -24,12 +24,11 @@ use zenoh_link_commons::LocatorInspector;
 use zenoh_protocol::{core::Locator, transport::BatchSize};
 use zenoh_result::ZResult;
 
-// mod unicast;
-// pub use unicast::*;
+mod unicast;
+pub use unicast::*;
 
 // WebTransport is a byte-stream link: zenoh batches are length-prefixed with
 // 16 bits, so the usable MTU is capped at BatchSize::MAX (65535).
-#[allow(dead_code)]
 const WEBTRANSPORT_MAX_MTU: BatchSize = BatchSize::MAX;
 pub const WEBTRANSPORT_LOCATOR_PREFIX: &str = "webtransport";
 
