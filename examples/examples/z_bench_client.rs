@@ -438,7 +438,7 @@ fn report(args: &Args, result: &RunResult) {
     );
 
     if let Some(path) = &args.csv {
-        let header = "pattern,load,rate,window,batch,size,duration_s,sent,acked,loss,achieved_msgs,achieved_mbs,acked_count,p50_us,p90_us,p99_us,p999_us,max_us";
+        let header = "pattern,load,rate,window,batch,size,duration_s,sent,acked,loss,achieved_msgs,achieved_mbs,acked_count,p50_us,p90_us,p99_us,p999_us,p9999_us,max_us";
         let rate_field = if args.load == Load::Open {
             args.rate.map(|r| r.to_string()).unwrap_or_default()
         } else {

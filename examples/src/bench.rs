@@ -75,11 +75,12 @@ impl Stats {
 
     pub fn summary(&self) -> String {
         format!(
-            "RTT latency (us): p50={:.1} p90={:.1} p99={:.1} p99.9={:.1} max={:.1} (n={})",
+            "RTT latency (us): p50={:.1} p90={:.1} p99={:.1} p99.9={:.1} p99.99={:.1} max={:.1} (n={})",
             self.us(0.50),
             self.us(0.90),
             self.us(0.99),
             self.us(0.999),
+            self.us(0.9999),
             self.hist.max() as f64 / 1_000.0,
             self.count(),
         )
@@ -87,12 +88,13 @@ impl Stats {
 
     pub fn csv_metrics(&self) -> String {
         format!(
-            "{},{:.1},{:.1},{:.1},{:.1},{:.1}",
+            "{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
             self.count(),
             self.us(0.50),
             self.us(0.90),
             self.us(0.99),
             self.us(0.999),
+            self.us(0.9999),
             self.hist.max() as f64 / 1_000.0,
         )
     }
@@ -140,7 +142,7 @@ mod tests {
         assert_eq!(s.count(), 1000);
         let csv = s.csv_metrics();
         let fields: Vec<&str> = csv.split(',').collect();
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields.len(), 7);
         assert_eq!(fields[0], "1000");
         let p50: f64 = fields[1].parse().unwrap();
         assert!((400.0..=600.0).contains(&p50), "p50 was {p50}");
