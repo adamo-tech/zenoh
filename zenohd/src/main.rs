@@ -22,7 +22,7 @@ const GIT_VERSION: &str = git_version!(prefix = "v", cargo_prefix = "v");
 
 lazy_static::lazy_static!(
     static ref LONG_VERSION: String = format!(
-        "{} (zenoh-build 1.9.0-adamo.6+native-auth.priority.stats.551084b758ce.reorder.b7e595308.webtransport.clean) built with {}",
+        "{} (zenoh-build 1.9.0-adamo.6+native-auth.priority.stats.551084b758ce.reorder.b7e595308.exprid.5045ad732.webtransport.clean) built with {}",
         GIT_VERSION, env!("RUSTC_VERSION")
     );
 );

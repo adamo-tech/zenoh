@@ -19,7 +19,7 @@ use std::{
     fmt::Debug,
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
-    sync::{Arc, RwLock, Weak},
+    sync::{atomic::Ordering, Arc, RwLock, Weak},
 };
 
 use zenoh_collections::{IntHashMap, IntHashSet, SingleOrBoxHashSet};
@@ -696,7 +696,21 @@ impl Resource {
                         .face_ctxs
                         .entry(face.id)
                         .or_insert_with(|| Arc::new(FaceContext::new(face.clone())));
-                    let expr_id = face.get_next_local_id();
+                    let Some(expr_id) = face.get_next_local_id() else {
+                        if !face
+                            .expr_id_exhausted
+                            .swap(true, Ordering::Relaxed)
+                        {
+                            tracing::error!(
+                                face_id = face.id,
+                                face_zid = %face.zid,
+                                local_mappings = face.local_mappings.len(),
+                                remote_mappings = face.remote_mappings.len(),
+                                "Wire-expression ID space exhausted; falling back to the full key expression"
+                            );
+                        }
+                        return res.expr().to_string().into();
+                    };
                     get_mut_unchecked(ctx).local_expr_id = Some(expr_id);
                     get_mut_unchecked(face)
                         .local_mappings
