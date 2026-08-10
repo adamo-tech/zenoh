@@ -163,7 +163,8 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
 #[cfg(any(
     feature = "transport_tls",
     feature = "transport_quic",
-    feature = "transport_quic_datagram"
+    feature = "transport_quic_datagram",
+    feature = "transport_webtransport"
 ))]
 const SERVER_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEAmDCySqKHPmEZShDH3ldPaV/Zsh9+HlHFLk9H10vJZj5WfzVu
@@ -196,7 +197,8 @@ ESElGO6qXEA821RpQp+2+uhL90+iC294cPqlS5LDmvTMypVDHzrxPQ==
 #[cfg(any(
     feature = "transport_tls",
     feature = "transport_quic",
-    feature = "transport_quic_datagram"
+    feature = "transport_quic_datagram",
+    feature = "transport_webtransport"
 ))]
 const SERVER_CERT: &str = "-----BEGIN CERTIFICATE-----
 MIIDLjCCAhagAwIBAgIIW1mAtJWJAJYwDQYJKoZIhvcNAQELBQAwIDEeMBwGA1UE
@@ -222,7 +224,8 @@ PQ4=
 #[cfg(any(
     feature = "transport_tls",
     feature = "transport_quic",
-    feature = "transport_quic_datagram"
+    feature = "transport_quic_datagram",
+    feature = "transport_webtransport"
 ))]
 const SERVER_CA: &str = "-----BEGIN CERTIFICATE-----
 MIIDSzCCAjOgAwIBAgIITcwv1N10nqEwDQYJKoZIhvcNAQELBQAwIDEeMBwGA1UE
@@ -1168,6 +1171,45 @@ async fn transport_unicast_quic_only_server() {
         Channel {
             priority: Priority::RealTime,
             reliability: Reliability::BestEffort,
+        },
+    ];
+    // Run
+    let endpoints = vec![endpoint];
+    run_with_universal_transport(&endpoints, &endpoints, &channel, &MSG_SIZE_ALL).await;
+}
+
+#[cfg(feature = "transport_webtransport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transport_unicast_webtransport_only_server() {
+    use zenoh_link_commons::tls::config::*;
+
+    zenoh_util::init_log_from_env_or("error");
+    // Define the locator
+    let mut endpoint: EndPoint = format!("webtransport/localhost:{}", get_free_udp_port())
+        .parse()
+        .unwrap();
+    endpoint
+        .config_mut()
+        .extend_from_iter(
+            [
+                (TLS_ROOT_CA_CERTIFICATE_RAW, SERVER_CA),
+                (TLS_LISTEN_CERTIFICATE_RAW, SERVER_CERT),
+                (TLS_LISTEN_PRIVATE_KEY_RAW, SERVER_KEY),
+            ]
+            .iter()
+            .copied(),
+        )
+        .unwrap();
+
+    // Define the reliability and congestion control
+    let channel = [
+        Channel {
+            priority: Priority::DEFAULT,
+            reliability: Reliability::Reliable,
+        },
+        Channel {
+            priority: Priority::RealTime,
+            reliability: Reliability::Reliable,
         },
     ];
     // Run

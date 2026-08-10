@@ -531,7 +531,11 @@ async fn openclose_lowlatency_transport(endpoint: &EndPoint) {
     openclose_transport(endpoint, endpoint, true).await
 }
 
-#[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+#[cfg(any(
+    feature = "transport_tls",
+    feature = "transport_quic",
+    feature = "transport_webtransport"
+))]
 async fn openclose_universal_transport_tls(
     mut endpoint: EndPoint,
     with_certificate_common_name: bool,
@@ -749,6 +753,15 @@ async fn openclose_quic_only_with_mtls_and_no_common_name() {
         .parse()
         .unwrap();
     openclose_universal_transport_tls(endpoint, true, true).await;
+}
+
+#[cfg(feature = "transport_webtransport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_webtransport_only() {
+    let endpoint: EndPoint = format!("webtransport/localhost:{}", get_free_udp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, false, false).await;
 }
 
 #[cfg(feature = "transport_tcp")]
@@ -1052,7 +1065,11 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
     (ca, cert, key)
 }
 
-#[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+#[cfg(any(
+    feature = "transport_tls",
+    feature = "transport_quic",
+    feature = "transport_webtransport"
+))]
 const fn get_tls_certs_without_common_name() -> (&'static str, &'static str, &'static str) {
     // NOTE: this an auto-generated pair of certificate and key.
     //       The target domain is localhost, so it has no real
