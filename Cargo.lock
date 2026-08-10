@@ -5140,6 +5140,7 @@ dependencies = [
  "zenoh-link-unixpipe",
  "zenoh-link-unixsock_stream",
  "zenoh-link-vsock",
+ "zenoh-link-webtransport",
  "zenoh-link-ws",
  "zenoh-protocol",
  "zenoh-result",
