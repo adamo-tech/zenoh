@@ -208,7 +208,15 @@ async fn collector(
             maybe = ack_rx.recv() => {
                 match maybe {
                     Some((seq, rtt)) => {
-                        sem.add_permits(1);
+                        // Probe acks (seq == u64::MAX) never took a permit from
+                        // this semaphore, which is created fresh per run after
+                        // the probe completes. A duplicate probe ack arriving
+                        // late (from the retried probe) must not credit a
+                        // permit here — that would inflate the closed-loop
+                        // in-flight window.
+                        if seq != u64::MAX {
+                            sem.add_permits(1);
+                        }
                         record(seq, rtt, &mut stats, &mut acked_measured);
                     }
                     None => break,
@@ -424,6 +432,10 @@ fn report(args: &Args, result: &RunResult) {
         }
     }
     println!("{}", result.stats.summary());
+    println!(
+        "batch={} size={} duration={}s warmup={}s",
+        args.batch, args.size, args.duration, args.warmup
+    );
 
     if let Some(path) = &args.csv {
         let header = "pattern,load,rate,window,batch,size,duration_s,sent,acked,loss,achieved_msgs,achieved_mbs,acked_count,p50_us,p90_us,p99_us,p999_us,max_us";
@@ -484,20 +496,44 @@ async fn main() {
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<(u64, u64)>();
     let sender = make_sender(&session, &args, epoch, &ack_tx).await;
 
-    // Connectivity probe: fail fast if no server is listening.
-    let probe_ts = epoch.elapsed().as_nanos() as u64;
-    sender.send(&args, u64::MAX, probe_ts, &ack_tx, epoch).await;
-    let probe_ack = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match ack_rx.recv().await {
-                Some((seq, _)) if seq == u64::MAX => return true,
-                Some(_) => continue,
-                None => return false,
-            }
+    // Connectivity probe: fail fast if no server is listening. Resend every
+    // ~500ms (reusing seq == u64::MAX) within the overall 5s deadline, to
+    // ride out a startup propagation race where the server's subscriber /
+    // queryable hasn't finished matching yet when the first probe goes out.
+    // Duplicate probe acks are harmless: the collector (started only after
+    // the probe completes) ignores seq == u64::MAX for both stats and
+    // semaphore permits, so a late duplicate that outlives this loop and
+    // lands in the collector's channel is a no-op there.
+    let probe_deadline = Instant::now() + Duration::from_secs(5);
+    let mut probe_acked = false;
+    while Instant::now() < probe_deadline {
+        let probe_ts = epoch.elapsed().as_nanos() as u64;
+        sender.send(&args, u64::MAX, probe_ts, &ack_tx, epoch).await;
+        let remaining = probe_deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(Duration::from_millis(500));
+        if wait.is_zero() {
+            break;
         }
-    })
-    .await;
-    if !matches!(probe_ack, Ok(true)) {
+        let got = tokio::time::timeout(wait, async {
+            loop {
+                match ack_rx.recv().await {
+                    Some((seq, _)) if seq == u64::MAX => return true,
+                    Some(_) => continue,
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        match got {
+            Ok(true) => {
+                probe_acked = true;
+                break;
+            }
+            Ok(false) => break, // ack channel closed, no point retrying
+            Err(_) => continue, // timed out this round, resend
+        }
+    }
+    if !probe_acked {
         eprintln!("no ack from server within 5s — is z_bench_server running?");
         std::process::exit(1);
     }
@@ -513,6 +549,11 @@ async fn main() {
     };
 
     report(&args, &result);
+
+    if result.sent_measured == 0 {
+        eprintln!("no messages were sent during the measured window — run invalid");
+        std::process::exit(1);
+    }
 
     if result.acked_measured < result.sent_measured * 95 / 100 {
         eprintln!(
