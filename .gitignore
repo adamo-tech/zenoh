@@ -37,3 +37,6 @@ ci/valgrind-check/*.log
 **/fuzz/artifacts
 **/fuzz/corpus
 **/fuzz/coverage
+
+# Demo TLS certs generated for the WebTransport link demo
+.demo-certs/
