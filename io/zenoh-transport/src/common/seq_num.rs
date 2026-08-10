@@ -71,8 +71,8 @@ impl SeqNumWindow {
             bail!("The sequence number window capacity must be non-zero");
         }
         let high_water = SeqNum::make(high_water, resolution)?;
-        let max_capacity = ((high_water.resolution() >> 1) + 1)
-            .min(usize::MAX as TransportSn) as usize;
+        let max_capacity =
+            ((high_water.resolution() >> 1) + 1).min(usize::MAX as TransportSn) as usize;
         let capacity = capacity.min(max_capacity);
         Ok(Self {
             high_water,
@@ -89,16 +89,14 @@ impl SeqNumWindow {
 
     pub(crate) fn observe(&mut self, value: TransportSn) -> ZResult<SeqNumWindowResult> {
         if self.high_water.precedes(value)? {
-            let distance =
-                value.wrapping_sub(self.high_water.get()) & self.high_water.resolution();
+            let distance = value.wrapping_sub(self.high_water.get()) & self.high_water.resolution();
             self.advance(distance as usize);
             self.high_water.set(value)?;
             self.mark(0);
             return Ok(SeqNumWindowResult::Ahead);
         }
 
-        let distance =
-            self.high_water.get().wrapping_sub(value) & self.high_water.resolution();
+        let distance = self.high_water.get().wrapping_sub(value) & self.high_water.resolution();
         let distance = distance as usize;
         if distance >= self.capacity {
             return Ok(SeqNumWindowResult::TooOld);
@@ -383,18 +381,9 @@ mod tests {
 
         assert_eq!(window.observe(10).unwrap(), SeqNumWindowResult::Ahead);
         assert_eq!(window.observe(12).unwrap(), SeqNumWindowResult::Ahead);
-        assert_eq!(
-            window.observe(11).unwrap(),
-            SeqNumWindowResult::Reordered
-        );
-        assert_eq!(
-            window.observe(11).unwrap(),
-            SeqNumWindowResult::Duplicate
-        );
-        assert_eq!(
-            window.observe(12).unwrap(),
-            SeqNumWindowResult::Duplicate
-        );
+        assert_eq!(window.observe(11).unwrap(), SeqNumWindowResult::Reordered);
+        assert_eq!(window.observe(11).unwrap(), SeqNumWindowResult::Duplicate);
+        assert_eq!(window.observe(12).unwrap(), SeqNumWindowResult::Duplicate);
     }
 
     #[test]
@@ -416,14 +405,8 @@ mod tests {
 
         assert_eq!(window.observe(mask).unwrap(), SeqNumWindowResult::Ahead);
         assert_eq!(window.observe(1).unwrap(), SeqNumWindowResult::Ahead);
-        assert_eq!(
-            window.observe(0).unwrap(),
-            SeqNumWindowResult::Reordered
-        );
-        assert_eq!(
-            window.observe(mask).unwrap(),
-            SeqNumWindowResult::Duplicate
-        );
+        assert_eq!(window.observe(0).unwrap(), SeqNumWindowResult::Reordered);
+        assert_eq!(window.observe(mask).unwrap(), SeqNumWindowResult::Duplicate);
     }
 
     #[test]
@@ -432,10 +415,7 @@ mod tests {
 
         assert_eq!(window.observe(1).unwrap(), SeqNumWindowResult::Ahead);
         assert_eq!(window.observe(66).unwrap(), SeqNumWindowResult::Ahead);
-        assert_eq!(
-            window.observe(1).unwrap(),
-            SeqNumWindowResult::Duplicate
-        );
+        assert_eq!(window.observe(1).unwrap(), SeqNumWindowResult::Duplicate);
         assert_eq!(window.observe(131).unwrap(), SeqNumWindowResult::Ahead);
         assert_eq!(window.observe(1).unwrap(), SeqNumWindowResult::TooOld);
     }

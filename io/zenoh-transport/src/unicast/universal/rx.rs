@@ -106,8 +106,7 @@ impl TransportUnicastUniversal {
             Reliability::BestEffort => zlock!(c.best_effort),
         };
 
-        let allow_reordering =
-            frame.reliability == Reliability::BestEffort && !link.is_streamed;
+        let allow_reordering = frame.reliability == Reliability::BestEffort && !link.is_streamed;
         if !self.verify_sn("Frame", frame.sn, allow_reordering, &mut guard)? {
             // Drop invalid message and continue
             return Ok(());

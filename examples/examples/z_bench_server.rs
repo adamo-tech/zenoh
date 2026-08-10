@@ -51,7 +51,9 @@ async fn main() {
                 .congestion_control(CongestionControl::Block)
                 .await
                 .unwrap();
-            println!("Serving pattern=pubsub on {key_data} (acks on {key_ack}). Press CTRL-C to quit...");
+            println!(
+                "Serving pattern=pubsub on {key_data} (acks on {key_ack}). Press CTRL-C to quit..."
+            );
             let mut received: u64 = 0;
             let mut bytes: u64 = 0;
             while let Ok(sample) = sub.recv_async().await {
@@ -75,9 +77,7 @@ async fn main() {
             let queryable = session.declare_queryable(key_query).await.unwrap();
             println!("Serving pattern=query on {key_query}. Press CTRL-C to quit...");
             while let Ok(query) = queryable.recv_async().await {
-                let header = query
-                    .payload()
-                    .and_then(|p| decode_header(&p.to_bytes()));
+                let header = query.payload().and_then(|p| decode_header(&p.to_bytes()));
                 if let Some((seq, ts)) = header {
                     let mut ack = [0u8; HEADER_LEN];
                     encode_header(&mut ack, seq, ts);

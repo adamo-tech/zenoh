@@ -58,8 +58,7 @@ impl TransportChannelRx {
         best_effort_reorder_window: usize,
     ) -> ZResult<TransportChannelRx> {
         let sn = SeqNum::make(0, resolution)?;
-        let frame_sn = (reliability == Reliability::BestEffort
-            && best_effort_reorder_window != 0)
+        let frame_sn = (reliability == Reliability::BestEffort && best_effort_reorder_window != 0)
             .then(|| SeqNumWindow::make(0, resolution, best_effort_reorder_window))
             .transpose()?;
         let defrag = DefragBuffer::make(reliability, resolution, defrag_buff_size)?;

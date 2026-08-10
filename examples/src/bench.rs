@@ -14,11 +14,7 @@
 
 //! Shared helpers for the z_bench_client / z_bench_server examples.
 
-use std::{
-    fs::OpenOptions,
-    io::Write,
-    path::Path,
-};
+use std::{fs::OpenOptions, io::Write, path::Path};
 
 use hdrhistogram::Histogram;
 

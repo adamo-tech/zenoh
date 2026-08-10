@@ -368,7 +368,9 @@ async fn run_open(
         }
         let scheduled_nanos = scheduled.saturating_duration_since(epoch).as_nanos() as u64;
         for _ in 0..args.batch {
-            sender.send(args, seq, scheduled_nanos, &ack_tx, epoch).await;
+            sender
+                .send(args, seq, scheduled_nanos, &ack_tx, epoch)
+                .await;
             if first_measured != u64::MAX {
                 sent_measured += 1;
             }
