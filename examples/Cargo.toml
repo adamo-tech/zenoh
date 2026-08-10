@@ -148,6 +148,10 @@ name = "z_sub_thr"
 path = "examples/z_sub_thr.rs"
 
 [[example]]
+name = "z_bench_server"
+path = "examples/z_bench_server.rs"
+
+[[example]]
 name = "z_pub_shm_thr"
 path = "examples/z_pub_shm_thr.rs"
 required-features = ["shared-memory", "unstable"]
