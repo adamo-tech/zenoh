@@ -345,6 +345,7 @@ pub enum InterceptorLink {
     UnixsockStream,
     Vsock,
     Ws,
+    WebTransport,
 }
 
 impl std::fmt::Display for InterceptorLink {
@@ -2078,26 +2079,12 @@ mod tests {
     #[test]
     fn test_best_effort_reorder_window_config() {
         let mut config = Config::default();
-        assert_eq!(
-            *config
-                .transport
-                .link
-                .rx
-                .best_effort_reorder_window(),
-            0
-        );
+        assert_eq!(*config.transport.link.rx.best_effort_reorder_window(), 0);
 
         config
             .insert_json5("transport/link/rx/best_effort_reorder_window", "1024")
             .unwrap();
-        assert_eq!(
-            *config
-                .transport
-                .link
-                .rx
-                .best_effort_reorder_window(),
-            1024
-        );
+        assert_eq!(*config.transport.link.rx.best_effort_reorder_window(), 1024);
     }
 
     #[test]

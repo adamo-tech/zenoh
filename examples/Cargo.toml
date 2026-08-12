@@ -29,6 +29,7 @@ publish = false
 [features]
 default = ["zenoh-ext/default", "zenoh/default"]
 shared-memory = ["zenoh/shared-memory"]
+transport_webtransport = ["zenoh/transport_webtransport"]
 unstable = ["zenoh/unstable"]
 
 [dependencies]

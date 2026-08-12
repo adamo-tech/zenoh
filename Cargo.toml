@@ -50,6 +50,7 @@ members = [
   "io/zenoh-links/zenoh-link-unixpipe/",
   "io/zenoh-links/zenoh-link-unixsock_stream/",
   "io/zenoh-links/zenoh-link-vsock/",
+  "io/zenoh-links/zenoh-link-webtransport/",
   "io/zenoh-links/zenoh-link-ws/",
   "io/zenoh-transport",
   "plugins/zenoh-backend-example",
@@ -150,6 +151,7 @@ proc-macro2 = "1.0.101"
 prometheus-client = "0.24.0"
 quinn = "0.11.5"
 quinn-proto = "0.11.5"
+web-transport-quinn = { version = "0.12.0", default-features = false, features = ["ring"] }
 quote = "1.0.40"
 rand = { version = "0.8.5", default-features = false } # Default features are disabled due to usage in no_std crates
 rand_chacha = "0.3.1"
@@ -249,6 +251,7 @@ zenoh-link-unixpipe = { version = "=1.9.0", path = "io/zenoh-links/zenoh-link-un
 zenoh-link-unixsock_stream = { version = "=1.9.0", path = "io/zenoh-links/zenoh-link-unixsock_stream" }
 zenoh-link-vsock = { version = "=1.9.0", path = "io/zenoh-links/zenoh-link-vsock" }
 zenoh-link-ws = { version = "=1.9.0", path = "io/zenoh-links/zenoh-link-ws" }
+zenoh-link-webtransport = { version = "=1.9.0", path = "io/zenoh-links/zenoh-link-webtransport" }
 zenoh-macros = { version = "=1.9.0", path = "commons/zenoh-macros" }
 zenoh-plugin-trait = { version = "=1.9.0", path = "plugins/zenoh-plugin-trait", default-features = false }
 zenoh-protocol = { version = "=1.9.0", path = "commons/zenoh-protocol", default-features = false }
