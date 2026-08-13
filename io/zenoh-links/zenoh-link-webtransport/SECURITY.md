@@ -19,4 +19,3 @@ consumes the ticket.
 The token is transported only in the encrypted CONNECT query because browser
 WebTransport cannot set request headers. Implementations must never log the
 request path or token.
-
