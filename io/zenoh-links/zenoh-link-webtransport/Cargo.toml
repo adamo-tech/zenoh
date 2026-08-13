@@ -1,0 +1,30 @@
+[package]
+authors = { workspace = true }
+categories = { workspace = true }
+description = "Native Zenoh byte-stream links over browser WebTransport"
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+name = "zenoh-link-webtransport"
+repository = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+
+[dependencies]
+async-trait = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+url = { workspace = true }
+wtransport = { workspace = true }
+zenoh-core = { workspace = true }
+zenoh-link-commons = { workspace = true, features = ["tls"] }
+zenoh-protocol = { workspace = true }
+zenoh-result = { workspace = true }
+zenoh-runtime = { workspace = true }
+
+[dev-dependencies]
+flume = { workspace = true }
+rcgen = { workspace = true }

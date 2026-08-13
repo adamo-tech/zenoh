@@ -769,6 +769,9 @@ impl InterceptorFactoryTrait for AclEnforcer {
                 LinkAuthId::Quic(value) => {
                     cert_common_names.push(value.as_ref().map(|v| CertCommonName(v.clone())));
                 }
+                LinkAuthId::WebTransport(value) => {
+                    cert_common_names.push(value.as_ref().map(|v| CertCommonName(v.clone())));
+                }
                 _ => {}
             }
             link_protocols.push(Some(InterceptorLinkWrapper::from(auth_id).0));

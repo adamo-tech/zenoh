@@ -78,6 +78,13 @@ use zenoh_link_vsock::{LinkManagerUnicastVsock, VsockLocatorInspector, VSOCK_LOC
 pub use zenoh_link_ws as ws;
 #[cfg(feature = "transport_ws")]
 use zenoh_link_ws::{LinkManagerUnicastWs, WsLocatorInspector, WS_LOCATOR_PREFIX};
+#[cfg(feature = "transport_webtransport")]
+pub use zenoh_link_webtransport as webtransport;
+#[cfg(feature = "transport_webtransport")]
+use zenoh_link_webtransport::{
+    LinkManagerUnicastWebTransport, WebTransportLocatorInspector,
+    WEBTRANSPORT_LOCATOR_PREFIX,
+};
 pub use zenoh_protocol::core::{EndPoint, Locator};
 use zenoh_result::{bail, ZResult};
 
@@ -93,6 +100,7 @@ pub enum LinkKind {
     UnixsockStream,
     Vscock,
     Ws,
+    WebTransport,
 }
 
 impl LinkKind {
@@ -120,6 +128,8 @@ impl LinkKind {
                 UNIXSOCKSTREAM_LOCATOR_PREFIX => supported_links.push(LinkKind::UnixsockStream),
                 #[cfg(feature = "transport_ws")]
                 WS_LOCATOR_PREFIX => supported_links.push(LinkKind::Ws),
+                #[cfg(feature = "transport_webtransport")]
+                WEBTRANSPORT_LOCATOR_PREFIX => supported_links.push(LinkKind::WebTransport),
                 #[cfg(feature = "transport_serial")]
                 SERIAL_LOCATOR_PREFIX => supported_links.push(LinkKind::Serial),
                 #[cfg(feature = "transport_unixpipe")]
@@ -174,6 +184,8 @@ impl TryFrom<&Locator> for LinkKind {
             UNIXSOCKSTREAM_LOCATOR_PREFIX => Ok(LinkKind::UnixsockStream),
             #[cfg(feature = "transport_ws")]
             WS_LOCATOR_PREFIX => Ok(LinkKind::Ws),
+            #[cfg(feature = "transport_webtransport")]
+            WEBTRANSPORT_LOCATOR_PREFIX => Ok(LinkKind::WebTransport),
             #[cfg(feature = "transport_serial")]
             SERIAL_LOCATOR_PREFIX => Ok(LinkKind::Serial),
             #[cfg(feature = "transport_unixpipe")]
@@ -209,6 +221,8 @@ pub const ALL_SUPPORTED_LINKS: &[LinkKind] = &[
     LinkKind::Udp,
     #[cfg(feature = "transport_ws")]
     LinkKind::Ws,
+    #[cfg(feature = "transport_webtransport")]
+    LinkKind::WebTransport,
     #[cfg(all(feature = "transport_unixsock-stream", target_family = "unix"))]
     LinkKind::UnixsockStream,
     #[cfg(feature = "transport_serial")]
@@ -233,6 +247,8 @@ pub struct LocatorInspector {
     udp_inspector: UdpLocatorInspector,
     #[cfg(feature = "transport_ws")]
     ws_inspector: WsLocatorInspector,
+    #[cfg(feature = "transport_webtransport")]
+    webtransport_inspector: WebTransportLocatorInspector,
     #[cfg(all(feature = "transport_unixsock-stream", target_family = "unix"))]
     unixsock_stream_inspector: UnixSockStreamLocatorInspector,
     #[cfg(feature = "transport_serial")]
@@ -261,6 +277,8 @@ impl LocatorInspector {
             LinkKind::UnixsockStream => self.unixsock_stream_inspector.is_reliable(locator),
             #[cfg(feature = "transport_ws")]
             LinkKind::Ws => self.ws_inspector.is_reliable(locator),
+            #[cfg(feature = "transport_webtransport")]
+            LinkKind::WebTransport => self.webtransport_inspector.is_reliable(locator),
             #[cfg(feature = "transport_serial")]
             LinkKind::Serial => self.serial_inspector.is_reliable(locator),
             #[cfg(feature = "transport_unixpipe")]
@@ -290,6 +308,8 @@ impl LocatorInspector {
             LinkKind::UnixsockStream => self.unixsock_stream_inspector.is_multicast(locator).await,
             #[cfg(feature = "transport_ws")]
             LinkKind::Ws => self.ws_inspector.is_multicast(locator).await,
+            #[cfg(feature = "transport_webtransport")]
+            LinkKind::WebTransport => self.webtransport_inspector.is_multicast(locator).await,
             #[cfg(feature = "transport_serial")]
             LinkKind::Serial => self.serial_inspector.is_multicast(locator).await,
             #[cfg(feature = "transport_unixpipe")]
@@ -396,6 +416,10 @@ impl LinkManagerBuilderUnicast {
             )),
             #[cfg(feature = "transport_ws")]
             LinkKind::Ws => Ok(std::sync::Arc::new(LinkManagerUnicastWs::new(_manager))),
+            #[cfg(feature = "transport_webtransport")]
+            LinkKind::WebTransport => Ok(std::sync::Arc::new(
+                LinkManagerUnicastWebTransport::new(_manager),
+            )),
             #[cfg(feature = "transport_serial")]
             LinkKind::Serial => Ok(std::sync::Arc::new(LinkManagerUnicastSerial::new(_manager))),
             #[cfg(feature = "transport_unixpipe")]

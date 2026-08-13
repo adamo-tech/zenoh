@@ -329,7 +329,9 @@ pub struct Link {
 impl Link {
     pub(crate) fn new(zid: ZenohId, link: &zenoh_link_commons::Link, is_qos: bool) -> Self {
         let auth_identifier = match &link.auth_identifier {
-            LinkAuthId::Tls(Some(s)) | LinkAuthId::Quic(Some(s)) => Some(s.clone()),
+            LinkAuthId::Tls(Some(s))
+            | LinkAuthId::Quic(Some(s))
+            | LinkAuthId::WebTransport(Some(s)) => Some(s.clone()),
             LinkAuthId::Tls(None)
             | LinkAuthId::Quic(None)
             | LinkAuthId::Tcp
@@ -338,7 +340,8 @@ impl Link {
             | LinkAuthId::Unixpipe
             | LinkAuthId::UnixsockStream
             | LinkAuthId::Vsock
-            | LinkAuthId::Ws => None, // avoid using _ wildcard to ensure that new protocols are correctly handled
+            | LinkAuthId::Ws
+            | LinkAuthId::WebTransport(None) => None, // avoid using _ wildcard to ensure that new protocols are correctly handled
         };
         let priorities = if is_qos {
             link.priorities
