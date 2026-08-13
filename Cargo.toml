@@ -14,6 +14,7 @@
 [workspace]
 exclude = ["ci/nostd-check", "ci/valgrind-check", "ci/zenoh-1-75"]
 members = [
+  "adamo-authorization",
   "commons/zenoh-buffers",
   "commons/zenoh-codec",
   "commons/zenoh-collections",

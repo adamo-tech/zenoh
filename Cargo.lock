@@ -3,6 +3,15 @@
 version = 3
 
 [[package]]
+name = "adamo-authorization"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zenoh-keyexpr",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6056,6 +6065,7 @@ dependencies = [
 name = "zenoh"
 version = "1.9.0"
 dependencies = [
+ "adamo-authorization",
  "ahash",
  "arc-swap",
  "async-trait",

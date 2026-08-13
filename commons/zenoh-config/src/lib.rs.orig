@@ -925,10 +925,6 @@ validated_struct::validator! {
         pub access_control: AclConfig {
             pub enabled: bool,
             pub default_permission: Permission,
-            /// Derive an unmatched TLS/QUIC client's tenant scope from its
-            /// verified certificate common name. Exact static subjects take
-            /// precedence and are used for service and mesh identities.
-            pub adamo_native_tenant_scope: bool,
             pub rules: Option<Vec<AclConfigRule>>,
             pub subjects: Option<Vec<AclConfigSubjects>>,
             pub policies: Option<Vec<AclConfigPolicyEntry>>,
