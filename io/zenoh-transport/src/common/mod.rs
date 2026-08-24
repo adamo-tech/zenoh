@@ -13,6 +13,7 @@
 //
 pub mod batch;
 pub(crate) mod defragmentation;
+pub(crate) mod fragment_reorder;
 pub(crate) mod pipeline;
 pub(crate) mod priority;
 pub(crate) mod seq_num;
