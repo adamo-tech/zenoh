@@ -22,6 +22,7 @@ use zenoh_result::ZResult;
 
 use super::{
     defragmentation::DefragBuffer,
+    fragment_reorder::FragmentReorderBuffer,
     seq_num::{SeqNum, SeqNumGenerator, SeqNumWindow},
 };
 
@@ -46,7 +47,8 @@ impl TransportChannelTx {
 #[derive(Debug)]
 pub(crate) struct TransportChannelRx {
     pub(crate) sn: SeqNum,
-    pub(crate) frame_sn: Option<SeqNumWindow>,
+    pub(crate) reorder_sn: Option<SeqNumWindow>,
+    pub(crate) fragment_reorder: Option<FragmentReorderBuffer>,
     pub(crate) defrag: DefragBuffer,
 }
 
@@ -58,14 +60,18 @@ impl TransportChannelRx {
         best_effort_reorder_window: usize,
     ) -> ZResult<TransportChannelRx> {
         let sn = SeqNum::make(0, resolution)?;
-        let frame_sn = (reliability == Reliability::BestEffort
+        let reorder_sn = (reliability == Reliability::BestEffort
             && best_effort_reorder_window != 0)
             .then(|| SeqNumWindow::make(0, resolution, best_effort_reorder_window))
             .transpose()?;
+        let fragment_reorder = (reliability == Reliability::BestEffort
+            && best_effort_reorder_window != 0)
+            .then(|| FragmentReorderBuffer::new(best_effort_reorder_window, sn.resolution()));
         let defrag = DefragBuffer::make(reliability, resolution, defrag_buff_size)?;
         let tch = TransportChannelRx {
             sn,
-            frame_sn,
+            reorder_sn,
+            fragment_reorder,
             defrag,
         };
         Ok(tch)
@@ -80,8 +86,11 @@ impl TransportChannelRx {
         };
 
         self.sn.set(sn)?;
-        if let Some(frame_sn) = self.frame_sn.as_mut() {
-            frame_sn.reset(sn)?;
+        if let Some(reorder_sn) = self.reorder_sn.as_mut() {
+            reorder_sn.reset(sn)?;
+        }
+        if let Some(fragment_reorder) = self.fragment_reorder.as_mut() {
+            fragment_reorder.clear();
         }
         self.defrag.sync(sn)
     }

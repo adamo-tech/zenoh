@@ -136,15 +136,9 @@ impl TransportUnicastUniversal {
         link: &Link,
         #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
     ) -> ZResult<()> {
-        let Fragment {
-            reliability,
-            more,
-            sn,
-            ext_qos: qos,
-            ext_first,
-            ext_drop,
-            payload,
-        } = fragment;
+        let reliability = fragment.reliability;
+        let sn = fragment.sn;
+        let qos = fragment.ext_qos;
 
         let c = if self.is_qos() {
             &self.priority_rx[qos.priority() as usize]
@@ -167,6 +161,54 @@ impl TransportUnicastUniversal {
             // Drop invalid message and continue
             return Ok(());
         }
+
+        if reliability == Reliability::BestEffort
+            && !link.is_streamed
+            && self.config.patch.has_fragmentation_markers()
+            && guard.fragment_reorder.is_some()
+        {
+            let messages = guard
+                .fragment_reorder
+                .as_mut()
+                .expect("fragment reorder buffer checked above")
+                .insert(fragment);
+            for message in messages {
+                for fragment in message {
+                    self.process_fragment(
+                        fragment,
+                        &mut guard,
+                        #[cfg(feature = "stats")]
+                        stats,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+
+        self.process_fragment(
+            fragment,
+            &mut guard,
+            #[cfg(feature = "stats")]
+            stats,
+        )
+    }
+
+    fn process_fragment(
+        &self,
+        fragment: Fragment,
+        guard: &mut TransportChannelRx,
+        #[cfg(feature = "stats")] stats: &zenoh_stats::LinkStats,
+    ) -> ZResult<()> {
+        let Fragment {
+            reliability,
+            more,
+            sn,
+            ext_qos: qos,
+            ext_first,
+            ext_drop,
+            payload,
+        } = fragment;
+
         if self.config.patch.has_fragmentation_markers() {
             if ext_first.is_some() {
                 guard.defrag.clear();
@@ -239,12 +281,14 @@ impl TransportUnicastUniversal {
         link: &Link,
         guard: &mut MutexGuard<'_, TransportChannelRx>,
     ) -> ZResult<bool> {
-        let unordered_frame = reliability == Reliability::BestEffort
-            && message_type == "Frame"
-            && !link.is_streamed;
-        if unordered_frame {
-            if let Some(frame_sn) = guard.frame_sn.as_mut() {
-                let result = frame_sn.observe(sn)?;
+        let unordered_message = reliability == Reliability::BestEffort
+            && !link.is_streamed
+            && (message_type == "Frame"
+                || (message_type == "Fragment"
+                    && self.config.patch.has_fragmentation_markers()));
+        if unordered_message {
+            if let Some(reorder_sn) = guard.reorder_sn.as_mut() {
+                let result = reorder_sn.observe(sn)?;
                 match result {
                     SeqNumWindowResult::Ahead => {
                         let advanced = guard.sn.roll(sn)?;
@@ -279,8 +323,8 @@ impl TransportUnicastUniversal {
         }
 
         if guard.sn.roll(sn)? {
-            if let Some(frame_sn) = guard.frame_sn.as_mut() {
-                let result = frame_sn.observe(sn)?;
+            if let Some(reorder_sn) = guard.reorder_sn.as_mut() {
+                let result = reorder_sn.observe(sn)?;
                 debug_assert_eq!(result, SeqNumWindowResult::Ahead);
             }
             return Ok(true);
