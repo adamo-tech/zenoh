@@ -400,7 +400,7 @@ pub mod session {
             TransportEventsListener, TransportEventsListenerBuilder,
             TransportEventsListenerUndeclaration, TransportsBuilder,
         },
-        info::{Link, LinkEvent, Transport, TransportEvent},
+        info::{Link, LinkEvent, QuicStats, Transport, TransportEvent},
     };
     pub use crate::api::{
         builders::{

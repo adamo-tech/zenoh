@@ -50,6 +50,9 @@ pub struct LinkUnicastQuicDatagram {
     dst_locator: Locator,
     auth_identifier: LinkAuthId,
     mtu: BatchSize,
+    is_multistream: bool,
+    is_mixed_rel: bool,
+    reports_quic_stats: bool,
     expiration_manager: Option<LinkCertExpirationManager>,
 }
 
@@ -62,6 +65,29 @@ impl LinkUnicastQuicDatagram {
         locator_prefix: &str,
         expiration_manager: Option<LinkCertExpirationManager>,
     ) -> LinkUnicastQuicDatagram {
+        Self::new_with_capabilities(
+            connection,
+            src_addr,
+            dst_locator,
+            auth_identifier,
+            locator_prefix,
+            expiration_manager,
+            false,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_capabilities(
+        connection: QuicConnection,
+        src_addr: SocketAddr,
+        dst_locator: Locator,
+        auth_identifier: LinkAuthId,
+        locator_prefix: &str,
+        expiration_manager: Option<LinkCertExpirationManager>,
+        is_multistream: bool,
+        is_mixed_rel: bool,
+    ) -> LinkUnicastQuicDatagram {
         // Zenoh Transport assumes calls to `LinkUnicastTrait::get_mtu` always yield the same
         // value. Therefore cache the initial MTU value (which is used in batch-size negotiation)
         let mtu = connection
@@ -70,6 +96,7 @@ impl LinkUnicastQuicDatagram {
             .unwrap_or(*QUIC_DATAGRAM_DEFAULT_MTU);
 
         // Build the Quic object
+        let reports_quic_stats = locator_prefix == QUIC_DATAGRAM_LOCATOR_PREFIX;
         LinkUnicastQuicDatagram {
             connection,
             src_addr,
@@ -77,6 +104,9 @@ impl LinkUnicastQuicDatagram {
             dst_locator,
             auth_identifier,
             mtu,
+            is_multistream,
+            is_mixed_rel,
+            reports_quic_stats,
             expiration_manager,
         }
     }
@@ -161,6 +191,14 @@ impl LinkUnicastTrait for LinkUnicastQuicDatagram {
         self.connection
             .max_datagram_size()
             .and_then(|size| BatchSize::try_from(size).ok())
+    }
+
+    #[inline(always)]
+    fn get_quic_stats(&self) -> Option<zenoh_link_commons::QuicStats> {
+        self.reports_quic_stats.then(|| {
+            self.connection
+                .stats(false, self.is_multistream, self.is_mixed_rel)
+        })
     }
 
     #[inline(always)]

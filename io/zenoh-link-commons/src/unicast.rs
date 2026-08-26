@@ -86,6 +86,11 @@ pub trait LinkUnicastTrait: Send + Sync {
     fn get_current_max_datagram_size(&self) -> Option<BatchSize> {
         None
     }
+    /// Returns live QUIC statistics for this link. Non-QUIC links return
+    /// `None`.
+    fn get_quic_stats(&self) -> Option<crate::QuicStats> {
+        None
+    }
     fn get_src(&self) -> &Locator;
     fn get_dst(&self) -> &Locator;
     fn is_reliable(&self) -> bool;

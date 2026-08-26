@@ -315,6 +315,54 @@ impl Transport {
     }
 }
 
+/// Point-in-time statistics from an established QUIC connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QuicStats {
+    pub connection_id: u64,
+    pub is_streamed: bool,
+    pub is_multistream: bool,
+    pub is_mixed_rel: bool,
+    pub rtt_us: u64,
+    pub cwnd: u64,
+    pub lost_packets: u64,
+    pub sent_packets: u64,
+    pub congestion_events: u64,
+    pub black_holes_detected: u64,
+    pub current_mtu: u16,
+    pub udp_tx_bytes: u64,
+    pub udp_tx_datagrams: u64,
+    pub udp_rx_bytes: u64,
+    pub frame_tx_datagram: u64,
+    pub frame_tx_stream: u64,
+    pub frame_rx_datagram: u64,
+    pub frame_rx_stream: u64,
+}
+
+impl From<zenoh_link_commons::QuicStats> for QuicStats {
+    fn from(stats: zenoh_link_commons::QuicStats) -> Self {
+        Self {
+            connection_id: stats.connection_id,
+            is_streamed: stats.is_streamed,
+            is_multistream: stats.is_multistream,
+            is_mixed_rel: stats.is_mixed_rel,
+            rtt_us: stats.rtt_us,
+            cwnd: stats.cwnd,
+            lost_packets: stats.lost_packets,
+            sent_packets: stats.sent_packets,
+            congestion_events: stats.congestion_events,
+            black_holes_detected: stats.black_holes_detected,
+            current_mtu: stats.current_mtu,
+            udp_tx_bytes: stats.udp_tx_bytes,
+            udp_tx_datagrams: stats.udp_tx_datagrams,
+            udp_rx_bytes: stats.udp_rx_bytes,
+            frame_tx_datagram: stats.frame_tx_datagram,
+            frame_tx_stream: stats.frame_tx_stream,
+            frame_rx_datagram: stats.frame_rx_datagram,
+            frame_rx_stream: stats.frame_rx_stream,
+        }
+    }
+}
+
 /// Describes a concrete link within a [`Transport`](crate::session::Transport).
 /// Zenoh can establish multiple links to the same remote zenoh node using different protocols
 /// (e.g., TCP, UDP, QUIC, etc.)
@@ -326,6 +374,7 @@ pub struct Link {
     pub(crate) group: Option<Locator>,
     pub(crate) mtu: u16,
     pub(crate) current_max_datagram_size: Option<u16>,
+    pub(crate) quic_stats: Option<QuicStats>,
     pub(crate) is_streamed: bool,
     pub(crate) interfaces: Vec<String>,
     pub(crate) auth_identifier: Option<String>,
@@ -384,6 +433,7 @@ impl Link {
             group: link.group.clone(),
             mtu: link.mtu,
             current_max_datagram_size: link.current_max_datagram_size,
+            quic_stats: link.quic_stats.map(Into::into),
             is_streamed: link.is_streamed,
             interfaces: link.interfaces.clone(),
             auth_identifier,
@@ -402,6 +452,7 @@ impl Link {
             group: None,
             mtu: 0,
             current_max_datagram_size: None,
+            quic_stats: None,
             is_streamed: false,
             interfaces: Vec::new(),
             auth_identifier: None,
@@ -452,6 +503,13 @@ impl Link {
     #[inline]
     pub fn current_max_datagram_size(&self) -> Option<u16> {
         self.current_max_datagram_size
+    }
+
+    /// Gets a point-in-time snapshot of the underlying QUIC connection.
+    /// Returns `None` for non-QUIC links.
+    #[inline]
+    pub fn quic_stats(&self) -> Option<QuicStats> {
+        self.quic_stats
     }
 
     /// Returns whether the link is streamed.
