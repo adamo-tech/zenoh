@@ -76,6 +76,12 @@ pub use connection_retry::*;
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct SecretString(String);
 
+/// Wrap a secret configuration value so it is redacted and zeroized once it
+/// is no longer needed.
+pub fn secret_value(value: impl Into<String>) -> SecretValue {
+    Secret::new(SecretString(value.into()))
+}
+
 impl ops::Deref for SecretString {
     type Target = String;
 

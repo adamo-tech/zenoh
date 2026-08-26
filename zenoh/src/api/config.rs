@@ -17,9 +17,55 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use zenoh_config::ExpandedConfig;
 use zenoh_result::{bail, ZResult};
+
+/// Certificate or private-key material for Zenoh's TLS-based links.
+///
+/// TLS and QUIC share this configuration. File paths are retained in the
+/// configuration and read when a link is opened. PEM values are immediately
+/// moved into Zenoh's redacted, zeroizing secret storage.
+#[derive(Clone, Copy)]
+pub enum TlsCredential<'a> {
+    File(&'a Path),
+    Pem(&'a str),
+}
+
+impl fmt::Debug for TlsCredential<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(path) => formatter.debug_tuple("File").field(path).finish(),
+            Self::Pem(_) => formatter.write_str("Pem([redacted])"),
+        }
+    }
+}
+
+/// A certificate chain and its corresponding private key.
+#[derive(Clone, Copy, Debug)]
+pub struct TlsIdentity<'a> {
+    certificate: TlsCredential<'a>,
+    private_key: TlsCredential<'a>,
+}
+
+impl<'a> TlsIdentity<'a> {
+    pub const fn new(certificate: TlsCredential<'a>, private_key: TlsCredential<'a>) -> Self {
+        Self {
+            certificate,
+            private_key,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TlsCredentialSlot {
+    RootCa,
+    ListenCertificate,
+    ListenPrivateKey,
+    ConnectCertificate,
+    ConnectPrivateKey,
+}
 
 /// Zenoh configuration.
 ///
@@ -98,6 +144,69 @@ impl Config {
         self.0.get_json(key).map_err(|err| zerror!("{err}").into())
     }
 
+    /// Replace the custom trust anchor used by TLS and QUIC links.
+    ///
+    /// Passing `None` removes the custom trust anchor. Connecting links then
+    /// use Zenoh's built-in WebPKI roots.
+    pub fn set_tls_root_ca(&mut self, credential: Option<TlsCredential<'_>>) -> ZResult<()> {
+        let mut updated = self.0.clone();
+        set_tls_credential(&mut updated, TlsCredentialSlot::RootCa, credential)?;
+        self.0 = updated;
+        Ok(())
+    }
+
+    /// Replace or clear the identity presented by TLS and QUIC listeners.
+    pub fn set_tls_listen_identity(&mut self, identity: Option<TlsIdentity<'_>>) -> ZResult<()> {
+        let mut updated = self.0.clone();
+        let (certificate, private_key) = identity
+            .map(|identity| (Some(identity.certificate), Some(identity.private_key)))
+            .unwrap_or((None, None));
+        set_tls_credential(
+            &mut updated,
+            TlsCredentialSlot::ListenCertificate,
+            certificate,
+        )?;
+        set_tls_credential(
+            &mut updated,
+            TlsCredentialSlot::ListenPrivateKey,
+            private_key,
+        )?;
+        self.0 = updated;
+        Ok(())
+    }
+
+    /// Replace or clear the identity presented by connecting TLS and QUIC
+    /// links when mutual authentication is enabled.
+    pub fn set_tls_connect_identity(&mut self, identity: Option<TlsIdentity<'_>>) -> ZResult<()> {
+        let mut updated = self.0.clone();
+        let (certificate, private_key) = identity
+            .map(|identity| (Some(identity.certificate), Some(identity.private_key)))
+            .unwrap_or((None, None));
+        set_tls_credential(
+            &mut updated,
+            TlsCredentialSlot::ConnectCertificate,
+            certificate,
+        )?;
+        set_tls_credential(
+            &mut updated,
+            TlsCredentialSlot::ConnectPrivateKey,
+            private_key,
+        )?;
+        self.0 = updated;
+        Ok(())
+    }
+
+    /// Enable or disable mutual authentication for TLS and QUIC links.
+    pub fn set_tls_mutual_authentication(&mut self, enabled: bool) -> ZResult<()> {
+        self.0
+            .transport
+            .link
+            .tls
+            .set_enable_mtls(Some(enabled))
+            .map(|_| ())
+            .map_err(|_| zerror!("Zenoh rejected the TLS mutual-authentication setting").into())
+    }
+
     // REVIEW(fuzzypixelz): the error variant of the Result is a Result because this does
     // deserialization AND validation.
     #[zenoh_macros::unstable]
@@ -117,6 +226,60 @@ impl Config {
             },
         }
     }
+}
+
+fn set_tls_credential(
+    config: &mut zenoh_config::Config,
+    slot: TlsCredentialSlot,
+    credential: Option<TlsCredential<'_>>,
+) -> ZResult<()> {
+    let (file, base64) = match credential {
+        Some(TlsCredential::File(path)) => {
+            if path.as_os_str().is_empty() {
+                bail!("TLS credential file path must not be empty");
+            }
+            let path = path
+                .to_str()
+                .ok_or_else(|| zerror!("TLS credential file path is not valid UTF-8: {path:?}"))?;
+            (Some(path.to_owned()), None)
+        }
+        Some(TlsCredential::Pem(pem)) => {
+            if pem.trim().is_empty() {
+                bail!("TLS credential PEM must not be empty");
+            }
+            let encoded = STANDARD.encode(pem);
+            (None, Some(zenoh_config::secret_value(encoded)))
+        }
+        None => (None, None),
+    };
+
+    let tls = &mut config.transport.link.tls;
+    macro_rules! set_pair {
+        ($file_setter:ident, $base64_setter:ident) => {{
+            tls.$file_setter(file)
+                .map_err(|_| zerror!("Zenoh rejected a TLS credential file"))?;
+            tls.$base64_setter(base64)
+                .map_err(|_| zerror!("Zenoh rejected inline TLS credential material"))?;
+        }};
+    }
+    match slot {
+        TlsCredentialSlot::RootCa => {
+            set_pair!(set_root_ca_certificate, set_root_ca_certificate_base64)
+        }
+        TlsCredentialSlot::ListenCertificate => {
+            set_pair!(set_listen_certificate, set_listen_certificate_base64)
+        }
+        TlsCredentialSlot::ListenPrivateKey => {
+            set_pair!(set_listen_private_key, set_listen_private_key_base64)
+        }
+        TlsCredentialSlot::ConnectCertificate => {
+            set_pair!(set_connect_certificate, set_connect_certificate_base64)
+        }
+        TlsCredentialSlot::ConnectPrivateKey => {
+            set_pair!(set_connect_private_key, set_connect_private_key_base64)
+        }
+    }
+    Ok(())
 }
 
 #[zenoh_macros::unstable]
@@ -274,9 +437,62 @@ impl Notifier<ExpandedConfig> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use zenoh_config::{InterceptorFlow, QosOverwriteItemConf};
 
     use crate::Config;
+
+    use super::{TlsCredential, TlsIdentity};
+
+    #[test]
+    fn typed_tls_credentials_replace_conflicting_representations() {
+        let mut config = Config::default();
+
+        config
+            .set_tls_root_ca(Some(TlsCredential::Pem("root-ca-pem")))
+            .unwrap();
+        assert!(config.0.transport.link.tls.root_ca_certificate().is_none());
+        assert!(config
+            .0
+            .transport
+            .link
+            .tls
+            .root_ca_certificate_base64()
+            .is_some());
+
+        config
+            .set_tls_root_ca(Some(TlsCredential::File(Path::new("/run/ca.pem"))))
+            .unwrap();
+        assert_eq!(
+            config.0.transport.link.tls.root_ca_certificate().as_deref(),
+            Some("/run/ca.pem")
+        );
+        assert!(config
+            .0
+            .transport
+            .link
+            .tls
+            .root_ca_certificate_base64()
+            .is_none());
+    }
+
+    #[test]
+    fn typed_tls_identity_is_updated_atomically() {
+        let mut config = Config::default();
+        config
+            .set_tls_listen_identity(Some(TlsIdentity::new(
+                TlsCredential::File(Path::new("/run/server.pem")),
+                TlsCredential::Pem("server-key-pem"),
+            )))
+            .unwrap();
+
+        let tls = &config.0.transport.link.tls;
+        assert_eq!(tls.listen_certificate().as_deref(), Some("/run/server.pem"));
+        assert!(tls.listen_certificate_base64().is_none());
+        assert!(tls.listen_private_key().is_none());
+        assert!(tls.listen_private_key_base64().is_some());
+    }
 
     #[test]
     fn runtime_try_insert_json5_array_item_rejects_non_plugin_keys() {
