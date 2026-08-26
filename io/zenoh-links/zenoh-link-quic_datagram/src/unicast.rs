@@ -154,6 +154,16 @@ impl LinkUnicastTrait for LinkUnicastQuicDatagram {
     }
 
     #[inline(always)]
+    fn get_current_max_datagram_size(&self) -> Option<BatchSize> {
+        // Quinn accounts for QUIC packet overhead, the current DPLPMTUD
+        // estimate, and the peer's DATAGRAM frame limit. Do not expose the raw
+        // UDP path MTU: callers need the number of bytes send_datagram accepts.
+        self.connection
+            .max_datagram_size()
+            .and_then(|size| BatchSize::try_from(size).ok())
+    }
+
+    #[inline(always)]
     fn get_interface_names(&self) -> Vec<String> {
         get_ip_interface_names(&self.src_addr)
     }

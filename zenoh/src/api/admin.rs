@@ -111,6 +111,8 @@ struct LinkJson {
     dst: Locator,
     group: Option<Locator>,
     mtu: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_max_datagram_size: Option<u16>,
     is_streamed: bool,
     interfaces: Vec<String>,
     auth_identifier: Option<String>,
@@ -127,6 +129,7 @@ impl From<Link> for LinkJson {
             dst: link.dst,
             group: link.group,
             mtu: link.mtu,
+            current_max_datagram_size: link.current_max_datagram_size,
             is_streamed: link.is_streamed,
             interfaces: link.interfaces,
             auth_identifier: link.auth_identifier,

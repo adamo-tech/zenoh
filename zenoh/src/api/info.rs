@@ -325,6 +325,7 @@ pub struct Link {
     pub(crate) dst: Locator,
     pub(crate) group: Option<Locator>,
     pub(crate) mtu: u16,
+    pub(crate) current_max_datagram_size: Option<u16>,
     pub(crate) is_streamed: bool,
     pub(crate) interfaces: Vec<String>,
     pub(crate) auth_identifier: Option<String>,
@@ -382,6 +383,7 @@ impl Link {
             dst: link.dst.clone(),
             group: link.group.clone(),
             mtu: link.mtu,
+            current_max_datagram_size: link.current_max_datagram_size,
             is_streamed: link.is_streamed,
             interfaces: link.interfaces.clone(),
             auth_identifier,
@@ -399,6 +401,7 @@ impl Link {
             dst: Locator::empty(),
             group: None,
             mtu: 0,
+            current_max_datagram_size: None,
             is_streamed: false,
             interfaces: Vec::new(),
             auth_identifier: None,
@@ -438,6 +441,17 @@ impl Link {
     #[inline]
     pub fn mtu(&self) -> u16 {
         self.mtu
+    }
+
+    /// Gets the current maximum unreliable datagram payload accepted by the
+    /// underlying link.
+    ///
+    /// This value can change as path-MTU discovery converges. It is `None` for
+    /// streamed links and for datagram links that cannot report a live limit.
+    /// Zenoh's own negotiated batch limit remains available through [`Self::mtu`].
+    #[inline]
+    pub fn current_max_datagram_size(&self) -> Option<u16> {
+        self.current_max_datagram_size
     }
 
     /// Returns whether the link is streamed.

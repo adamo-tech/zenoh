@@ -78,6 +78,14 @@ impl fmt::Debug for NewLink {
 #[async_trait]
 pub trait LinkUnicastTrait: Send + Sync {
     fn get_mtu(&self) -> BatchSize;
+    /// Returns the link's current maximum unreliable datagram payload.
+    ///
+    /// Unlike [`Self::get_mtu`], this value may change during a connection's
+    /// lifetime as path-MTU discovery converges. Streamed links and unreliable
+    /// links that cannot report a live limit return `None`.
+    fn get_current_max_datagram_size(&self) -> Option<BatchSize> {
+        None
+    }
     fn get_src(&self) -> &Locator;
     fn get_dst(&self) -> &Locator;
     fn is_reliable(&self) -> bool;
