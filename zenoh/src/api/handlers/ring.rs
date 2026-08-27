@@ -14,7 +14,10 @@
 
 //! Callback handler trait.
 use std::{
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Weak,
+    },
     time::{Duration, Instant},
 };
 
@@ -52,6 +55,7 @@ impl Default for RingChannel {
 struct RingChannelInner<T> {
     ring: std::sync::Mutex<RingBuffer<T>>,
     not_empty: flume::Receiver<()>,
+    dropped: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -60,6 +64,23 @@ pub struct RingChannelHandler<T> {
 }
 
 impl<T> RingChannelHandler<T> {
+    /// Number of oldest items discarded because the ring was full.
+    pub fn dropped_count(&self) -> u64 {
+        self.ring
+            .upgrade()
+            .map(|channel| channel.dropped.load(Ordering::Relaxed))
+            .unwrap_or_default()
+    }
+
+    /// Returns and clears the number of oldest items discarded since the
+    /// previous call.
+    pub fn take_dropped_count(&self) -> u64 {
+        self.ring
+            .upgrade()
+            .map(|channel| channel.dropped.swap(0, Ordering::Relaxed))
+            .unwrap_or_default()
+    }
+
     /// Receive from the ring channel.
     ///
     /// If the ring channel is empty, this call will block until an element is available in the channel.
@@ -156,6 +177,7 @@ impl<T: Send + 'static> IntoHandler<T> for RingChannel {
         let inner = Arc::new(RingChannelInner {
             ring: std::sync::Mutex::new(RingBuffer::new(self.capacity)),
             not_empty: receiver,
+            dropped: AtomicU64::new(0),
         });
         let receiver = RingChannelHandler {
             ring: Arc::downgrade(&inner),
@@ -164,7 +186,9 @@ impl<T: Send + 'static> IntoHandler<T> for RingChannel {
             Callback::from(move |t| match inner.ring.lock() {
                 Ok(mut g) => {
                     // Eventually drop the oldest element.
-                    g.push_force(t);
+                    if g.push_force(t).is_some() {
+                        inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
                     drop(g);
                     let _ = sender.try_send(());
                 }

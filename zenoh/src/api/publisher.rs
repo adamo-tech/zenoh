@@ -125,6 +125,64 @@ pub struct Publisher<'a> {
 }
 
 impl<'a> Publisher<'a> {
+    /// Returns this publisher's largest unfragmented datagram payload.
+    ///
+    /// The payload is measured by asking Zenoh's real codec whether it can
+    /// encode the complete network message in a datagram batch of
+    /// `max_batch_size` bytes.
+    ///
+    /// The result accounts for this publisher's declared key expression,
+    /// encoding, QoS, reliability, express flag, Zenoh timestamp, frame header,
+    /// and worst-case transport sequence-number width.
+    #[zenoh_macros::unstable]
+    pub fn max_unfragmented_payload(&self, max_batch_size: u16) -> usize {
+        let fits = |payload_size| self.payload_fits_unfragmented(payload_size, max_batch_size);
+
+        if !fits(0) {
+            return 0;
+        }
+        let mut lower = 0usize;
+        let mut upper = usize::from(max_batch_size);
+        while lower < upper {
+            let middle = lower + (upper - lower).div_ceil(2);
+            if fits(middle) {
+                lower = middle;
+            } else {
+                upper = middle - 1;
+            }
+        }
+        lower
+    }
+
+    #[cfg(feature = "unstable")]
+    fn payload_fits_unfragmented(&self, payload_size: usize, max_batch_size: u16) -> bool {
+        use zenoh_protocol::{
+            network::{NetworkBody, NetworkMessage, NetworkMessageExt, Push},
+            zenoh::{PushBody, Put},
+        };
+
+        let mut push = Push::from(PushBody::Put(Put {
+            timestamp: Some(self.session.new_timestamp()),
+            encoding: self.encoding.clone().into(),
+            payload: vec![0; payload_size].into(),
+            ..Put::default()
+        }));
+        push.wire_expr = self.key_expr.to_wire(&self.session).to_owned();
+        push.ext_qos = zenoh_protocol::network::push::ext::QoSType::new(
+            self.priority.into(),
+            self.congestion_control,
+            self.is_express,
+        );
+        let message = NetworkMessage {
+            body: NetworkBody::Push(push),
+            reliability: self.reliability,
+        };
+        zenoh_transport::common::batch::network_message_fits_unfragmented(
+            message.as_ref(),
+            max_batch_size,
+        )
+    }
+
     /// Returns the [`EntityGlobalId`] of this Publisher.
     ///
     /// # Examples
@@ -735,5 +793,30 @@ mod tests {
 
         sample_kind_integrity_in_put_builder_with(SampleKind::Put);
         sample_kind_integrity_in_put_builder_with(SampleKind::Delete);
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn maximum_unfragmented_payload_is_an_exact_codec_boundary() {
+        use crate::api::session::open;
+
+        let config = Config::from_json5(
+            r#"{
+                listen: { endpoints: [] },
+                connect: { endpoints: [] },
+                scouting: { multicast: { enabled: false } },
+            }"#,
+        )
+        .unwrap();
+        let session = open(config).wait().unwrap();
+        let publisher = session
+            .declare_publisher("test/unfragmented-capacity")
+            .express(true)
+            .wait()
+            .unwrap();
+        let batch_size = 1_200;
+        let maximum = publisher.max_unfragmented_payload(batch_size);
+        assert!(publisher.payload_fits_unfragmented(maximum, batch_size));
+        assert!(!publisher.payload_fits_unfragmented(maximum + 1, batch_size));
     }
 }

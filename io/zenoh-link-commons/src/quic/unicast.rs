@@ -78,6 +78,37 @@ impl QuicConnection {
         }
         !closed
     }
+
+    /// Samples Quinn's live counters without starting a process-global
+    /// poller or exposing Quinn types outside the link layer.
+    pub fn stats(
+        &self,
+        is_streamed: bool,
+        is_multistream: bool,
+        is_mixed_rel: bool,
+    ) -> crate::QuicStats {
+        let stats = self.conn.stats();
+        crate::QuicStats {
+            connection_id: self.conn.stable_id() as u64,
+            is_streamed,
+            is_multistream,
+            is_mixed_rel,
+            rtt_us: stats.path.rtt.as_micros() as u64,
+            cwnd: stats.path.cwnd,
+            lost_packets: stats.path.lost_packets,
+            sent_packets: stats.path.sent_packets,
+            congestion_events: stats.path.congestion_events,
+            black_holes_detected: stats.path.black_holes_detected,
+            current_mtu: stats.path.current_mtu,
+            udp_tx_bytes: stats.udp_tx.bytes,
+            udp_tx_datagrams: stats.udp_tx.datagrams,
+            udp_rx_bytes: stats.udp_rx.bytes,
+            frame_tx_datagram: stats.frame_tx.datagram,
+            frame_tx_stream: stats.frame_tx.stream,
+            frame_rx_datagram: stats.frame_rx.datagram,
+            frame_rx_stream: stats.frame_rx.stream,
+        }
+    }
 }
 
 impl Deref for QuicConnection {

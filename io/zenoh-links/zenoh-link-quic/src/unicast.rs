@@ -47,6 +47,7 @@ pub struct LinkUnicastQuic {
     src_locator: Locator,
     dst_locator: Locator,
     streams: QuicStreams,
+    is_mixed_rel: bool,
     auth_identifier: LinkAuthId,
     expiration_manager: Option<LinkCertExpirationManager>,
 }
@@ -60,6 +61,7 @@ impl LinkUnicastQuic {
         src_addr: SocketAddr,
         dst_locator: Locator,
         streams: QuicStreams,
+        is_mixed_rel: bool,
         auth_identifier: LinkAuthId,
         expiration_manager: Option<LinkCertExpirationManager>,
     ) -> LinkUnicastQuic {
@@ -69,6 +71,7 @@ impl LinkUnicastQuic {
             src_locator: Locator::new(QUIC_LOCATOR_PREFIX, src_addr.to_string(), "").unwrap(),
             dst_locator,
             streams,
+            is_mixed_rel,
             auth_identifier,
             expiration_manager,
         }
@@ -156,6 +159,14 @@ impl LinkUnicastTrait for LinkUnicastQuic {
     #[inline(always)]
     fn get_interface_names(&self) -> Vec<String> {
         get_ip_interface_names(&self.src_addr)
+    }
+
+    #[inline(always)]
+    fn get_quic_stats(&self) -> Option<zenoh_link_commons::QuicStats> {
+        Some(
+            self.connection
+                .stats(true, self.streams.is_multistream, self.is_mixed_rel),
+        )
     }
 
     #[inline(always)]
@@ -258,6 +269,9 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
         let certchain_expiration_time =
             get_cert_chain_expiration(&quic_conn)?.expect("server should have certificate chain");
 
+        let is_multistream = streams
+            .as_ref()
+            .is_some_and(|streams| streams.is_multistream);
         let link = Arc::<LinkUnicastQuic>::new_cyclic(|weak_link| {
             let mut expiration_manager = None;
             if tls_close_link_on_expiration {
@@ -275,19 +289,22 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
                 src_addr,
                 endpoint.clone().into(),
                 streams.expect("reliable QUIC streams should have been opened"),
+                is_mixed_rel,
                 auth_id.clone().into(),
                 expiration_manager,
             )
         });
 
         if is_mixed_rel {
-            let best_effort = Arc::new(LinkUnicastQuicDatagram::new(
+            let best_effort = Arc::new(LinkUnicastQuicDatagram::new_with_capabilities(
                 quic_conn,
                 src_addr,
                 endpoint.into(),
                 auth_id.into(),
                 QUIC_LOCATOR_PREFIX,
                 None, // One link with expiration manager causes both to close
+                is_multistream,
+                true,
             ));
             Ok(LinkUnicast(NewLink::MixedReliability {
                 reliable: link,
@@ -355,6 +372,7 @@ fn acceptor_callback(link_material: QuicLinkMaterial) -> ZResult<LinkUnicast> {
         tls_close_link_on_expiration,
     } = link_material;
     let streams = streams.expect("Streams should be initialized");
+    let is_multistream = streams.is_multistream;
 
     let dst_locator = Locator::new(QUIC_LOCATOR_PREFIX, dst_addr.to_string(), "")?;
     // Get Quic auth identifier
@@ -397,19 +415,22 @@ fn acceptor_callback(link_material: QuicLinkMaterial) -> ZResult<LinkUnicast> {
             src_addr,
             dst_locator.clone(),
             streams,
+            is_mixed_rel,
             auth_id.clone().into(),
             expiration_manager,
         )
     });
 
     if is_mixed_rel {
-        let best_effort = Arc::new(LinkUnicastQuicDatagram::new(
+        let best_effort = Arc::new(LinkUnicastQuicDatagram::new_with_capabilities(
             quic_conn,
             src_addr,
             dst_locator,
             auth_id.into(),
             QUIC_LOCATOR_PREFIX,
             None, // One link with expiration manager causes both to close
+            is_multistream,
+            true,
         ));
         Ok(LinkUnicast(NewLink::MixedReliability {
             reliable: link,

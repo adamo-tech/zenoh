@@ -54,12 +54,40 @@ pub const TCP_SO_SND_BUF: &str = "so_sndbuf";
 pub const TCP_SO_RCV_BUF: &str = "so_rcvbuf";
 pub const DSCP: &str = "dscp";
 
+/// Point-in-time counters for an established QUIC connection.
+///
+/// These are copied from Quinn so callers never depend on Quinn's public
+/// types and can sample the connection without a background polling task.
+#[derive(Clone, Copy, Debug, Serialize, Hash, PartialEq, Eq)]
+pub struct QuicStats {
+    pub connection_id: u64,
+    pub is_streamed: bool,
+    pub is_multistream: bool,
+    pub is_mixed_rel: bool,
+    pub rtt_us: u64,
+    pub cwnd: u64,
+    pub lost_packets: u64,
+    pub sent_packets: u64,
+    pub congestion_events: u64,
+    pub black_holes_detected: u64,
+    pub current_mtu: u16,
+    pub udp_tx_bytes: u64,
+    pub udp_tx_datagrams: u64,
+    pub udp_rx_bytes: u64,
+    pub frame_tx_datagram: u64,
+    pub frame_tx_stream: u64,
+    pub frame_rx_datagram: u64,
+    pub frame_rx_stream: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Hash, PartialEq, Eq)]
 pub struct Link {
     pub src: Locator,
     pub dst: Locator,
     pub group: Option<Locator>,
     pub mtu: BatchSize,
+    pub current_max_datagram_size: Option<BatchSize>,
+    pub quic_stats: Option<QuicStats>,
     pub is_streamed: bool,
     pub interfaces: Vec<String>,
     pub auth_identifier: LinkAuthId,
@@ -95,6 +123,8 @@ impl Link {
             dst: Self::to_patched_locator(link.get_dst(), priorities.as_ref(), reliability),
             group: None,
             mtu: link.get_mtu(),
+            current_max_datagram_size: link.get_current_max_datagram_size(),
+            quic_stats: link.get_quic_stats(),
             is_streamed: link.is_streamed(),
             interfaces: link.get_interface_names(),
             auth_identifier: link.get_auth_id().clone(),
@@ -109,6 +139,8 @@ impl Link {
             dst: link.get_dst().to_owned(),
             group: Some(link.get_dst().to_owned()),
             mtu: link.get_mtu(),
+            current_max_datagram_size: None,
+            quic_stats: None,
             is_streamed: false,
             interfaces: vec![],
             auth_identifier: link.get_auth_id().clone(),

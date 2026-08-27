@@ -27,8 +27,13 @@ use zenoh_codec::{
     RCodec, WCodec,
 };
 use zenoh_protocol::{
-    network::NetworkMessageRef,
-    transport::{fragment::FragmentHeader, frame::FrameHeader, BatchSize, TransportMessage},
+    core::Reliability,
+    network::{NetworkMessageExt, NetworkMessageRef},
+    transport::{
+        fragment::FragmentHeader,
+        frame::{self, FrameHeader},
+        BatchSize, TransportMessage,
+    },
 };
 use zenoh_result::{zerror, ZResult};
 #[cfg(feature = "transport_compression")]
@@ -401,6 +406,33 @@ impl Encode<(NetworkMessageRef<'_>, &FrameHeader)> for &mut WBatch {
         }
         res
     }
+}
+
+/// Returns whether `message` can be encoded as one complete Zenoh frame in an
+/// otherwise empty datagram batch of `max_batch_size` bytes.
+///
+/// The probe uses the real batch and network codecs and the largest transport
+/// sequence number, so callers do not need to estimate Zenoh framing overhead.
+pub fn network_message_fits_unfragmented(
+    message: NetworkMessageRef<'_>,
+    max_batch_size: BatchSize,
+) -> bool {
+    let mut batch = WBatch::new(BatchConfig {
+        mtu: max_batch_size,
+        is_streamed: false,
+        #[cfg(feature = "transport_compression")]
+        is_compression: false,
+    });
+    let frame = FrameHeader {
+        reliability: if message.is_reliable() {
+            Reliability::Reliable
+        } else {
+            Reliability::BestEffort
+        },
+        sn: u32::MAX,
+        ext_qos: frame::ext::QoSType::new(message.priority()),
+    };
+    (&mut batch).encode((message, &frame)).is_ok()
 }
 
 impl Encode<(&mut ZBufReader<'_>, &mut FragmentHeader)> for &mut WBatch {
