@@ -94,6 +94,10 @@ pub(crate) trait TransportUnicastTrait: Send + Sync {
         other_lease: Duration,
     ) -> AddLinkResult;
 
+    /// Prefer links added after `previous_links`, then gracefully retire the
+    /// previous logical links without closing the transport itself.
+    async fn make_before_break(&self, previous_links: Vec<Link>) -> ZResult<()>;
+
     /*************************************/
     /*                TX                 */
     /*************************************/

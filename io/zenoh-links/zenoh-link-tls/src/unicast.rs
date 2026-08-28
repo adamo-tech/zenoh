@@ -331,9 +331,12 @@ impl LinkManagerUnicastTls {
     }
 }
 
-#[async_trait]
-impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
-    async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {
+impl LinkManagerUnicastTls {
+    async fn make_client_link(
+        &self,
+        endpoint: EndPoint,
+        identity: Option<zenoh_link_commons::tls::TlsClientIdentity>,
+    ) -> ZResult<LinkUnicast> {
         let epaddr = endpoint.address();
         let epconf = endpoint.config();
 
@@ -350,9 +353,11 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
         }
 
         // Initialize the TLS Config
-        let client_config = TlsClientConfig::new(&epconf)
-            .await
-            .map_err(|e| zerror!("Cannot create a new TLS listener to {endpoint}: {e}"))?;
+        let client_config = match identity.as_ref() {
+            Some(identity) => TlsClientConfig::new_with_identity(&epconf, Some(identity)).await,
+            None => TlsClientConfig::new(&epconf).await,
+        }
+        .map_err(|e| zerror!("Cannot create a new TLS listener to {endpoint}: {e}"))?;
         let config = Arc::new(client_config.client_config);
         let connector = TlsConnector::from(config);
 
@@ -410,6 +415,21 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
         });
 
         Ok(LinkUnicast::from(link as Arc<dyn LinkUnicastTrait>))
+    }
+}
+
+#[async_trait]
+impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
+    async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {
+        self.make_client_link(endpoint, None).await
+    }
+
+    async fn new_link_with_tls_identity(
+        &self,
+        endpoint: EndPoint,
+        identity: zenoh_link_commons::tls::TlsClientIdentity,
+    ) -> ZResult<LinkUnicast> {
+        self.make_client_link(endpoint, Some(identity)).await
     }
 
     async fn new_listener(&self, endpoint: EndPoint) -> ZResult<Locator> {

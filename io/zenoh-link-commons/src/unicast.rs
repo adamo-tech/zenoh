@@ -33,6 +33,18 @@ pub type LinkManagerUnicast = Arc<dyn LinkManagerUnicastTrait>;
 #[async_trait]
 pub trait LinkManagerUnicastTrait: Send + Sync {
     async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast>;
+    #[cfg(feature = "tls")]
+    async fn new_link_with_tls_identity(
+        &self,
+        endpoint: EndPoint,
+        _identity: crate::tls::TlsClientIdentity,
+    ) -> ZResult<LinkUnicast> {
+        Err(zenoh_result::zerror!(
+            "Link protocol {} does not support TLS client-identity replacement",
+            endpoint.protocol()
+        )
+        .into())
+    }
     async fn new_listener(&self, endpoint: EndPoint) -> ZResult<Locator>;
     async fn del_listener(&self, endpoint: &EndPoint) -> ZResult<()>;
     async fn get_listeners(&self) -> Vec<EndPoint>;

@@ -343,6 +343,17 @@ impl Debug for TlsClientConfig {
 
 impl TlsClientConfig {
     pub async fn new(config: &Config<'_>, secure: bool) -> ZResult<Self> {
+        Self::new_with_identity(config, secure, None).await
+    }
+
+    pub async fn new_with_identity(
+        config: &Config<'_>,
+        secure: bool,
+        identity: Option<&crate::tls::TlsClientIdentity>,
+    ) -> ZResult<Self> {
+        if !secure && identity.is_some() {
+            bail!("A TLS client identity cannot be used with an insecure QUIC link");
+        }
         let tls_close_link_on_expiration: bool = match config.get(TLS_CLOSE_LINK_ON_EXPIRATION) {
             Some(s) => s
                 .parse()
@@ -361,7 +372,7 @@ impl TlsClientConfig {
             .ok();
 
         let cc = if secure {
-            Self::new_secure_tls(config).await?
+            Self::new_secure_tls(config, identity).await?
         } else {
             Self::new_unsecure_tls()?
         };
@@ -372,7 +383,10 @@ impl TlsClientConfig {
         })
     }
 
-    async fn new_secure_tls(config: &Config<'_>) -> ZResult<ClientConfig> {
+    async fn new_secure_tls(
+        config: &Config<'_>,
+        identity: Option<&crate::tls::TlsClientIdentity>,
+    ) -> ZResult<ClientConfig> {
         let tls_client_server_auth: bool = match config.get(TLS_ENABLE_MTLS) {
             Some(s) => s
                 .parse()
@@ -403,8 +417,16 @@ impl TlsClientConfig {
 
         let cc = if tls_client_server_auth {
             tracing::debug!("Loading client authentication key and certificate...");
-            let tls_client_private_key = TlsClientConfig::load_tls_private_key(config).await?;
-            let tls_client_certificate = TlsClientConfig::load_tls_certificate(config).await?;
+            let (tls_client_private_key, tls_client_certificate) = match identity {
+                Some(identity) => (
+                    identity.private_key_pem().as_bytes().to_vec(),
+                    identity.certificate_pem().as_bytes().to_vec(),
+                ),
+                None => (
+                    TlsClientConfig::load_tls_private_key(config).await?,
+                    TlsClientConfig::load_tls_certificate(config).await?,
+                ),
+            };
 
             let certs: Vec<CertificateDer> =
                 rustls_pemfile::certs(&mut Cursor::new(&tls_client_certificate))

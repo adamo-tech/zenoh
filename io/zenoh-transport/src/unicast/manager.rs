@@ -841,6 +841,61 @@ impl TransportManager {
             .await
     }
 
+    /// Establish a second authenticated link to an existing peer, prefer it
+    /// for new traffic, then gracefully retire the previous logical link.
+    /// The transport, callbacks, routing face, declarations, and sequence
+    /// state remain unchanged.
+    #[cfg(any(feature = "transport_quic", feature = "transport_tls"))]
+    pub async fn replace_transport_unicast_tls_link(
+        &self,
+        mut endpoint: EndPoint,
+        expected_zid: &ZenohIdProto,
+        identity: zenoh_link_commons::tls::TlsClientIdentity,
+    ) -> ZResult<TransportUnicast> {
+        let existing = self
+            .get_transport_unicast(expected_zid)
+            .await
+            .ok_or_else(|| zerror!("No existing transport with peer {expected_zid}"))?;
+        let previous_links = existing.get_links()?;
+        if previous_links.is_empty() {
+            bail!("Existing transport with peer {expected_zid} has no live links")
+        }
+
+        let manager = self.new_link_manager_unicast(&endpoint).await?;
+        if let Some(config) = self
+            .config
+            .link_configs
+            .get(&LinkKind::try_from(&endpoint)?)
+        {
+            let mut config = parameters::Parameters::from(config.as_str());
+            config.extend_from_iter(endpoint.config().iter());
+            endpoint = EndPoint::new(
+                endpoint.protocol(),
+                endpoint.address(),
+                endpoint.metadata(),
+                config.as_str(),
+            )?;
+        }
+
+        let transport = tokio::time::timeout(self.config.unicast.open_timeout, async {
+            let link = manager
+                .new_link_with_tls_identity(endpoint.clone(), identity)
+                .await?;
+            super::establishment::open::open_link(
+                endpoint,
+                link,
+                self,
+                Some(expected_zid),
+            )
+            .await
+        })
+        .await
+        .map_err(|error| zerror!("{error}"))??;
+
+        transport.make_before_break(previous_links).await?;
+        Ok(transport)
+    }
+
     async fn open_transport_unicast_inner(
         &self,
         mut endpoint: EndPoint,

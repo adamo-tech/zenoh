@@ -348,6 +348,7 @@ impl Default for AclConfig {
         Self {
             enabled: false,
             default_permission: Permission::Deny,
+            adamo_tenant_scope_from_identity: false,
             rules: None,
             subjects: None,
             policies: None,

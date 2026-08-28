@@ -281,6 +281,22 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
 
         let mut guard = zwrite!(self.links);
 
+        if !guard.accepts_authenticated_identity(&link) {
+            let existing = guard.authenticated_identity().unwrap_or("<unauthenticated>");
+            let replacement = link
+                .link
+                .link
+                .get_auth_id()
+                .get_cert_common_name()
+                .unwrap_or("<unauthenticated>");
+            let e = zerror!(
+                "Can not add link with authenticated identity `{replacement}` to transport {} whose established identity is `{existing}`",
+                self.config.zid
+            );
+            let (l, asl) = link.fail();
+            return Err((e.into(), l, asl, close::reason::INVALID));
+        }
+
         // Check if we can add more inbound links
         if let TransportLinkUnicastDirection::Inbound = link.inner_config().direction {
             let limit = zcondfeat!(
@@ -345,6 +361,26 @@ impl TransportUnicastTrait for TransportUnicastUniversal {
         });
 
         Ok((start_tx, start_rx, ack, status_guard))
+    }
+
+    async fn make_before_break(&self, previous_links: Vec<Link>) -> ZResult<()> {
+        {
+            let mut links = zwrite!(self.links);
+            links.promote_links_not_in(&previous_links)?;
+        }
+
+        // Removing a mixed-reliability link also removes its associated link.
+        // Check each old view before removal so the second view is harmless.
+        for previous in previous_links {
+            let still_present = zread!(self.links)
+                .get_links()
+                .iter()
+                .any(|link| TransportLinks::same_link(link, &previous));
+            if still_present {
+                self.del_link(previous).await?;
+            }
+        }
+        Ok(())
     }
 
     /*************************************/
@@ -481,6 +517,50 @@ impl TransportLinks {
         &self.inner
     }
 
+    fn authenticated_identity(&self) -> Option<&str> {
+        self.inner
+            .iter()
+            .find_map(|link| link.link.link.get_auth_id().get_cert_common_name())
+    }
+
+    fn accepts_authenticated_identity(&self, candidate: &LinkUnicastWithOpenAck) -> bool {
+        if self.inner.is_empty() {
+            return true;
+        }
+        let established = self.authenticated_identity();
+        let candidate = candidate
+            .link
+            .link
+            .get_auth_id()
+            .get_cert_common_name();
+        if established.is_none() && candidate.is_none() {
+            return true;
+        }
+        established == candidate
+            && self.inner.iter().all(|link| {
+                link.link.link.get_auth_id().get_cert_common_name() == established
+            })
+    }
+
+    fn same_link(link: &TransportLinkMarker, other: &Link) -> bool {
+        let link = link.link.link();
+        link.src == other.src && link.dst == other.dst
+    }
+
+    fn promote_links_not_in(&mut self, previous: &[Link]) -> ZResult<()> {
+        let (mut replacement, previous): (Vec<_>, Vec<_>) = self
+            .inner
+            .to_vec()
+            .into_iter()
+            .partition(|link| !previous.iter().any(|old| Self::same_link(link, old)));
+        if replacement.is_empty() {
+            bail!("Make-before-break did not establish a replacement link")
+        }
+        replacement.extend(previous);
+        self.inner = replacement.into_boxed_slice();
+        Ok(())
+    }
+
     fn push_link(
         &mut self,
         link: TransportLinkUnicastUniversal,
@@ -508,12 +588,14 @@ impl TransportLinks {
     )> {
         let link_equality = |tl: &TransportLinkUnicastUniversal, link: &Link| {
             // Compare LinkUnicast link to not compare TransportLinkUnicast direction
-            Link::new_unicast(
+            let current = Link::new_unicast(
                 &tl.link.link,
                 tl.link.config.priorities.clone(),
                 tl.link.config.reliability,
-            )
-            .eq(link)
+            );
+            // Live QUIC counters are point-in-time data and can change between
+            // selecting and removing a link. Endpoint identity is stable.
+            current.src == link.src && current.dst == link.dst
         };
         let index = self.inner.iter().position(|tl| link_equality(tl, link))?;
         let is_asl = matches!(self.inner[index], TransportLinkMarker::AssociatedLink(_));

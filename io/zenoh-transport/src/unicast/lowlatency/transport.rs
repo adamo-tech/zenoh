@@ -324,6 +324,11 @@ impl TransportUnicastTrait for TransportUnicastLowlatency {
         Ok((start_tx, start_rx, ack, status_guard))
     }
 
+
+    async fn make_before_break(&self, _previous_links: Vec<Link>) -> ZResult<()> {
+        Err(zerror!("Low-latency transports do not support make-before-break link replacement").into())
+    }
+
     /*************************************/
     /*           TERMINATION             */
     /*************************************/

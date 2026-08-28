@@ -36,7 +36,7 @@ use zenoh_link_commons::{
     tcp::TcpSocketConfig,
     tls::{
         config::{self, *},
-        WebPkiVerifierAnyServerName,
+        TlsClientIdentity, WebPkiVerifierAnyServerName,
     },
     ConfigurationInspector, BIND_INTERFACE, BIND_SOCKET, TCP_SO_RCV_BUF, TCP_SO_SND_BUF,
 };
@@ -322,6 +322,13 @@ pub(crate) struct TlsClientConfig<'a> {
 
 impl<'a> TlsClientConfig<'a> {
     pub async fn new(config: &'a Config<'_>) -> ZResult<Self> {
+        Self::new_with_identity(config, None).await
+    }
+
+    pub async fn new_with_identity(
+        config: &'a Config<'_>,
+        identity: Option<&TlsClientIdentity>,
+    ) -> ZResult<Self> {
         let tls_client_server_auth: bool = match config.get(TLS_ENABLE_MTLS) {
             Some(s) => s
                 .parse()
@@ -369,8 +376,16 @@ impl<'a> TlsClientConfig<'a> {
 
         let cc = if tls_client_server_auth {
             tracing::debug!("Loading client authentication key and certificate...");
-            let tls_client_private_key = TlsClientConfig::load_tls_private_key(config).await?;
-            let tls_client_certificate = TlsClientConfig::load_tls_certificate(config).await?;
+            let (tls_client_private_key, tls_client_certificate) = match identity {
+                Some(identity) => (
+                    identity.private_key_pem().as_bytes().to_vec(),
+                    identity.certificate_pem().as_bytes().to_vec(),
+                ),
+                None => (
+                    TlsClientConfig::load_tls_private_key(config).await?,
+                    TlsClientConfig::load_tls_certificate(config).await?,
+                ),
+            };
 
             let certs: Vec<CertificateDer> =
                 rustls_pemfile::certs(&mut Cursor::new(&tls_client_certificate))

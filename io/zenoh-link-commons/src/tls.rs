@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use secrecy::{ExposeSecret, SecretString};
 use rustls::{
     client::{
         danger::{ServerCertVerified, ServerCertVerifier},
@@ -11,6 +12,51 @@ use rustls::{
     RootCertStore,
 };
 use webpki::ALL_VERIFICATION_ALGS;
+
+/// An in-memory client identity used for a single new TLS or QUIC handshake.
+///
+/// This is deliberately separate from endpoint configuration so rotating a
+/// client certificate does not retain private-key material in endpoint
+/// strings, reconnect bookkeeping, or diagnostics.
+#[derive(Clone)]
+pub struct TlsClientIdentity {
+    certificate_pem: SecretString,
+    private_key_pem: SecretString,
+}
+
+impl TlsClientIdentity {
+    pub fn from_pem(
+        certificate_pem: impl Into<String>,
+        private_key_pem: impl Into<String>,
+    ) -> Result<Self, &'static str> {
+        let certificate_pem = certificate_pem.into();
+        let private_key_pem = private_key_pem.into();
+        if certificate_pem.trim().is_empty() {
+            return Err("TLS client certificate PEM must not be empty");
+        }
+        if private_key_pem.trim().is_empty() {
+            return Err("TLS client private key PEM must not be empty");
+        }
+        Ok(Self {
+            certificate_pem: SecretString::new(certificate_pem),
+            private_key_pem: SecretString::new(private_key_pem),
+        })
+    }
+
+    pub fn certificate_pem(&self) -> &str {
+        self.certificate_pem.expose_secret()
+    }
+
+    pub fn private_key_pem(&self) -> &str {
+        self.private_key_pem.expose_secret()
+    }
+}
+
+impl core::fmt::Debug for TlsClientIdentity {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("TlsClientIdentity([redacted])")
+    }
+}
 
 pub mod config {
     pub const TLS_ROOT_CA_CERTIFICATE_FILE: &str = "root_ca_certificate_file";

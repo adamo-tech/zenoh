@@ -187,6 +187,7 @@ pub(crate) struct RuntimeState {
     plugins_manager: Mutex<PluginsManager>,
     start_conditions: Arc<StartConditions>,
     pending_connections: tokio::sync::Mutex<HashSet<ZenohIdProto>>,
+    link_replacement: tokio::sync::Mutex<()>,
     namespace: Option<OwnedNonWildKeyExpr>,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::StatsRegistry,
@@ -826,6 +827,7 @@ impl RuntimeBuilder {
                 plugins_manager: Mutex::new(plugins_manager),
                 start_conditions: Arc::new(StartConditions::default()),
                 pending_connections: tokio::sync::Mutex::new(HashSet::new()),
+                link_replacement: tokio::sync::Mutex::new(()),
                 namespace,
                 #[cfg(feature = "stats")]
                 stats,
@@ -920,6 +922,54 @@ impl Runtime {
     #[inline(always)]
     pub(crate) fn manager(&self) -> &TransportManager {
         self.state.manager()
+    }
+
+    #[cfg(any(feature = "transport_quic", feature = "transport_tls"))]
+    pub(crate) async fn replace_tls_connect_identity(
+        &self,
+        certificate_pem: String,
+        private_key_pem: String,
+    ) -> ZResult<()> {
+        if self.whatami() != WhatAmI::Client {
+            bail!("TLS client-identity replacement is only supported by client runtimes")
+        }
+        let _replacement = self.state.link_replacement.lock().await;
+        let transports = self.manager().get_transports_unicast().await;
+        if transports.len() != 1 {
+            bail!(
+                "TLS client-identity replacement requires exactly one live transport; found {}",
+                transports.len()
+            )
+        }
+        let transport = &transports[0];
+        let expected_zid = transport.get_zid()?;
+        let callback = transport
+            .get_callback()?
+            .ok_or_else(|| zenoh_result::zerror!("Existing transport has no runtime callback"))?;
+        let session = callback
+            .as_any()
+            .downcast_ref::<RuntimeSession>()
+            .ok_or_else(|| zenoh_result::zerror!("Existing transport has an unexpected callback"))?;
+        let endpoints = zread!(session.endpoints)
+            .iter()
+            .filter(|endpoint| matches!(endpoint.protocol().as_str(), "quic" | "tls"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if endpoints.len() != 1 {
+            bail!(
+                "TLS client-identity replacement requires exactly one configured TLS or QUIC endpoint; found {}",
+                endpoints.len()
+            )
+        }
+        let identity = zenoh_link_commons::tls::TlsClientIdentity::from_pem(
+            certificate_pem,
+            private_key_pem,
+        )
+        .map_err(|error| zenoh_result::zerror!("{error}"))?;
+        self.manager()
+            .replace_transport_unicast_tls_link(endpoints[0].clone(), &expected_zid, identity)
+            .await?;
+        Ok(())
     }
 
     #[cfg(feature = "plugins")]

@@ -938,6 +938,9 @@ validated_struct::validator! {
         pub access_control: AclConfig {
             pub enabled: bool,
             pub default_permission: Permission,
+            /// Derive an authenticated tenant's scope from its verified
+            /// transport identity. This mode requires default-deny.
+            pub adamo_tenant_scope_from_identity: bool,
             pub rules: Option<Vec<AclConfigRule>>,
             pub subjects: Option<Vec<AclConfigSubjects>>,
             pub policies: Option<Vec<AclConfigPolicyEntry>>,

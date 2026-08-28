@@ -464,6 +464,7 @@ pub struct QuicClientBuilder<'a> {
     endpoint: &'a EndPoint,
     is_streamed: bool,
     is_secure: bool,
+    tls_identity: Option<crate::tls::TlsClientIdentity>,
 }
 
 impl fmt::Debug for QuicClientBuilder<'_> {
@@ -472,6 +473,7 @@ impl fmt::Debug for QuicClientBuilder<'_> {
             .field("endpoint", &self.endpoint)
             .field("is_streamed", &self.is_streamed)
             .field("is_secure", &self.is_secure)
+            .field("tls_identity", &self.tls_identity)
             .finish()
     }
 }
@@ -482,11 +484,17 @@ impl<'a> QuicClientBuilder<'a> {
             endpoint,
             is_streamed: true,
             is_secure: true,
+            tls_identity: None,
         }
     }
 
     pub fn streamed(mut self, is_streamed: bool) -> Self {
         self.is_streamed = is_streamed;
+        self
+    }
+
+    pub fn tls_identity(mut self, identity: crate::tls::TlsClientIdentity) -> Self {
+        self.tls_identity = Some(identity);
         self
     }
 
@@ -507,6 +515,7 @@ impl<'a> IntoFuture for QuicClientBuilder<'a> {
             self.endpoint,
             self.is_streamed,
             self.is_secure,
+            self.tls_identity,
         ))
     }
 }
@@ -536,14 +545,20 @@ impl fmt::Debug for QuicClient {
 }
 
 impl QuicClient {
-    async fn new(endpoint: &EndPoint, is_streamed: bool, is_secure: bool) -> ZResult<Self> {
+    async fn new(
+        endpoint: &EndPoint,
+        is_streamed: bool,
+        is_secure: bool,
+        tls_identity: Option<crate::tls::TlsClientIdentity>,
+    ) -> ZResult<Self> {
         let epaddr = endpoint.address();
         let host = get_quic_host(&epaddr)?;
         let epconf = endpoint.config();
         let dst_addr = get_quic_addr(&epaddr).await?;
 
         // Initialize the QUIC connection
-        let mut client_crypto = TlsClientConfig::new(&epconf, is_secure)
+        let mut client_crypto =
+            TlsClientConfig::new_with_identity(&epconf, is_secure, tls_identity.as_ref())
             .await
             .map_err(|e| zerror!("Cannot create a new QUIC client on {dst_addr}: {e}"))?;
 

@@ -132,6 +132,10 @@ impl TransportUnicast {
         Ok(transport.get_links())
     }
 
+    async fn make_before_break(&self, previous_links: Vec<Link>) -> ZResult<()> {
+        self.get_inner()?.make_before_break(previous_links).await
+    }
+
     pub fn get_auth_ids(&self) -> ZResult<TransportAuthId> {
         let transport = self.get_inner()?;
         Ok(transport.get_auth_ids())

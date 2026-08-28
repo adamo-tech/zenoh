@@ -123,6 +123,10 @@ impl TransportUnicastTrait for MockTransportUnicastInner {
         unimplemented!("MockTransportUnicastInner::add_link")
     }
 
+    async fn make_before_break(&self, _previous_links: Vec<Link>) -> ZResult<()> {
+        unimplemented!("MockTransportUnicastInner::make_before_break")
+    }
+
     fn schedule(&self, msg: NetworkMessageMut) -> ZResult<bool> {
         let body = match msg.body {
             NetworkBodyMut::Push(p) => NetworkBody::Push(p.clone()),

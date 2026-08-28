@@ -20,6 +20,10 @@
 
 use std::{any::Any, collections::HashSet, iter, sync::Arc};
 
+use adamo_authorization::{
+    AuthorizationPolicy, Direction, Effect, Ingress, Operation, is_reserved_identity,
+    valid_organization,
+};
 use itertools::Itertools;
 use zenoh_config::{
     AclConfig, AclMessage, CertCommonName, InterceptorFlow, Interface, Permission, Username,
@@ -48,6 +52,7 @@ use crate::{
 };
 pub struct AclEnforcer {
     enforcer: Arc<PolicyEnforcer>,
+    tenant_scope_from_identity: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AuthSubject {
@@ -55,9 +60,22 @@ pub struct AuthSubject {
     name: String,
 }
 
+fn tenant_policy_from_identity(
+    enabled: bool,
+    identities: &HashSet<String>,
+) -> Option<AuthorizationPolicy> {
+    if !enabled || identities.len() != 1 {
+        return None;
+    }
+    let identity = identities.iter().next().expect("length checked above");
+    (valid_organization(identity) && !is_reserved_identity(identity))
+        .then(|| AuthorizationPolicy::new(identity))
+}
+
 struct EgressAclEnforcer {
     policy_enforcer: Arc<PolicyEnforcer>,
     subject: Vec<AuthSubject>,
+    tenant_policy: Option<AuthorizationPolicy>,
     zid: ZenohIdProto,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::DropStats,
@@ -367,6 +385,7 @@ impl EgressAclEnforcer {
 struct IngressAclEnforcer {
     policy_enforcer: Arc<PolicyEnforcer>,
     subject: Vec<AuthSubject>,
+    tenant_policy: Option<AuthorizationPolicy>,
     zid: ZenohIdProto,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::DropStats,
@@ -700,12 +719,18 @@ pub(crate) fn acl_interceptor_factories(
     let mut res: Vec<InterceptorFactory> = vec![];
 
     if acl_config.enabled {
+        if acl_config.adamo_tenant_scope_from_identity
+            && acl_config.default_permission != Permission::Deny
+        {
+            bail!("Adamo tenant scope from identity requires default_permission=deny");
+        }
         let mut policy_enforcer = PolicyEnforcer::new();
         match policy_enforcer.init(acl_config) {
             Ok(_) => {
                 tracing::debug!("Access control is enabled");
                 res.push(Box::new(AclEnforcer {
                     enforcer: Arc::new(policy_enforcer),
+                    tenant_scope_from_identity: acl_config.adamo_tenant_scope_from_identity,
                 }))
             }
             Err(e) => bail!("Access control not enabled due to: {}", e),
@@ -750,6 +775,16 @@ impl InterceptorFactoryTrait for AclEnforcer {
         if cert_common_names.is_empty() {
             cert_common_names.push(None);
         }
+        let tenant_identities = auth_ids
+            .link_auth_ids()
+            .iter()
+            .filter_map(|auth_id| match auth_id {
+                LinkAuthId::Tls(Some(value)) | LinkAuthId::Quic(Some(value)) => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
 
         let links = match transport.get_links() {
             Ok(links) => links,
@@ -806,7 +841,9 @@ impl InterceptorFactoryTrait for AclEnforcer {
         };
         // FIXME: Investigate if `AuthSubject` can have duplicates above and try to avoid this conversion
         let auth_subjects = auth_subjects.into_iter().collect::<Vec<AuthSubject>>();
-        if auth_subjects.is_empty() {
+        let tenant_policy =
+            tenant_policy_from_identity(self.tenant_scope_from_identity, &tenant_identities);
+        if auth_subjects.is_empty() && tenant_policy.is_none() {
             tracing::info!(
                 "{zid} did not match any configured ACL subject. Default permission `{:?}` will be applied on all messages",
                 self.enforcer.default_permission
@@ -824,6 +861,7 @@ impl InterceptorFactoryTrait for AclEnforcer {
             policy_enforcer: self.enforcer.clone(),
             zid,
             subject: auth_subjects.clone(),
+            tenant_policy: tenant_policy.clone(),
             #[cfg(feature = "stats")]
             stats: stats.clone(),
         });
@@ -831,17 +869,14 @@ impl InterceptorFactoryTrait for AclEnforcer {
             policy_enforcer: self.enforcer.clone(),
             zid,
             subject: auth_subjects,
+            tenant_policy,
             #[cfg(feature = "stats")]
             stats: stats.clone(),
         });
         (
-            self.enforcer
-                .interface_enabled
-                .ingress
+            (self.tenant_scope_from_identity || self.enforcer.interface_enabled.ingress)
                 .then_some(ingress_interceptor),
-            self.enforcer
-                .interface_enabled
-                .egress
+            (self.tenant_scope_from_identity || self.enforcer.interface_enabled.egress)
                 .then_some(egress_interceptor),
         )
     }
@@ -975,10 +1010,46 @@ pub trait AclActionMethods {
     fn zid(&self) -> &ZenohIdProto;
     fn flow(&self) -> InterceptorFlow;
     fn authn_ids(&self) -> &Vec<AuthSubject>;
+    fn tenant_policy(&self) -> Option<&AuthorizationPolicy>;
     fn action(&self, action: AclMessage, log_msg: &str, key_expr: &keyexpr) -> Permission {
         let policy_enforcer = self.policy_enforcer();
         let authn_ids = self.authn_ids();
         let zid = self.zid();
+        if let Some(policy) = self.tenant_policy() {
+            let operation = match action {
+                AclMessage::Put => Operation::Put,
+                AclMessage::Delete => Operation::Delete,
+                AclMessage::DeclareSubscriber => Operation::Subscribe,
+                AclMessage::Query => Operation::Get,
+                AclMessage::Reply => Operation::Reply,
+                AclMessage::DeclareQueryable => Operation::DeclareQueryable,
+                AclMessage::LivelinessToken => Operation::LivelinessDeclare,
+                AclMessage::LivelinessQuery => Operation::LivelinessGet,
+                AclMessage::DeclareLivelinessSubscriber => Operation::LivelinessSubscribe,
+            };
+            let direction = match self.flow() {
+                InterceptorFlow::Ingress => Direction::Ingress,
+                InterceptorFlow::Egress => Direction::Egress,
+            };
+            let decision = policy.decide_with_direction(
+                operation,
+                key_expr.as_str(),
+                Ingress::Native,
+                direction,
+            );
+            tracing::trace!(
+                "{} tenant identity policy {} to {} on {}: {}",
+                zid,
+                if decision.allowed() { "authorized" } else { "denied" },
+                log_msg,
+                key_expr,
+                decision.reason.code(),
+            );
+            return match decision.effect {
+                Effect::Allow => Permission::Allow,
+                Effect::Deny => Permission::Deny,
+            };
+        }
         let mut decision = policy_enforcer.default_permission;
         for subject in authn_ids {
             match policy_enforcer.policy_decision_point(subject.id, self.flow(), action, key_expr) {
@@ -1038,6 +1109,10 @@ impl AclActionMethods for EgressAclEnforcer {
     fn authn_ids(&self) -> &Vec<AuthSubject> {
         &self.subject
     }
+
+    fn tenant_policy(&self) -> Option<&AuthorizationPolicy> {
+        self.tenant_policy.as_ref()
+    }
 }
 
 impl AclActionMethods for IngressAclEnforcer {
@@ -1055,5 +1130,48 @@ impl AclActionMethods for IngressAclEnforcer {
 
     fn authn_ids(&self) -> &Vec<AuthSubject> {
         &self.subject
+    }
+
+    fn tenant_policy(&self) -> Option<&AuthorizationPolicy> {
+        self.tenant_policy.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod adamo_tenant_identity_tests {
+    use super::*;
+
+    #[test]
+    fn arbitrary_verified_org_is_scoped_without_static_configuration() {
+        let identities = HashSet::from(["created-after-router-start".to_owned()]);
+        let policy = tenant_policy_from_identity(true, &identities).unwrap();
+        assert!(policy
+            .decide_with_direction(
+                Operation::Put,
+                "adamo/created-after-router-start/robot/state",
+                Ingress::Native,
+                Direction::Ingress,
+            )
+            .allowed());
+        assert!(!policy
+            .decide_with_direction(
+                Operation::Put,
+                "adamo/another-org/robot/state",
+                Ingress::Native,
+                Direction::Ingress,
+            )
+            .allowed());
+    }
+
+    #[test]
+    fn missing_ambiguous_invalid_and_reserved_identities_fail_closed() {
+        for identities in [
+            HashSet::new(),
+            HashSet::from(["one".to_owned(), "two".to_owned()]),
+            HashSet::from(["Bad_Tenant".to_owned()]),
+            HashSet::from(["adamo-router-us".to_owned()]),
+        ] {
+            assert!(tenant_policy_from_identity(true, &identities).is_none());
+        }
     }
 }

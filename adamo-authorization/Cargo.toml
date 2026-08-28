@@ -1,0 +1,9 @@
+[package]
+name = "adamo-authorization"
+version = "0.1.0"
+edition = "2021"
+description = "Shared operation-aware authorization policy for Adamo transports"
+publish = false
+
+[dependencies]
+zenoh-keyexpr = { workspace = true }

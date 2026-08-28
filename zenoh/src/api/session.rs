@@ -1484,6 +1484,26 @@ impl Session {
         &self.0.runtime
     }
 
+    /// Replace the certificate presented by the connecting TLS/QUIC link.
+    ///
+    /// This does not replace the Zenoh session. A new authenticated link is
+    /// established first; only then is the previous link drained and closed.
+    #[zenoh_macros::unstable]
+    pub async fn replace_tls_connect_identity(
+        &self,
+        certificate_pem: impl Into<String>,
+        private_key_pem: impl Into<String>,
+    ) -> ZResult<()> {
+        let runtime = self
+            .0
+            .runtime
+            .static_runtime()
+            .ok_or_else(|| zerror!("TLS client-identity replacement requires an owned runtime"))?;
+        runtime
+            .replace_tls_connect_identity(certificate_pem.into(), private_key_pem.into())
+            .await
+    }
+
     pub(crate) fn queries_default_timeout(&self) -> Duration {
         Duration::from_millis(self.0.runtime.get_config().queries_default_timeout_ms())
     }
