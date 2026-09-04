@@ -67,7 +67,18 @@ pub struct QuicStats {
     pub rtt_us: u64,
     pub cwnd: u64,
     pub lost_packets: u64,
+    pub lost_bytes: u64,
     pub sent_packets: u64,
+    /// Bytes the peer has acknowledged. Every packet carrying a DATAGRAM
+    /// frame is ack-eliciting, so this covers best-effort media too.
+    pub delivered_bytes: u64,
+    /// The share of `delivered_bytes` acknowledged while the sender was
+    /// waiting on application data rather than on the congestion window.
+    pub app_limited_delivered_bytes: u64,
+    /// Datagram payload waiting in the connection for the congestion window
+    /// to open, and the most that may wait before the oldest is dropped.
+    pub datagram_send_queue_bytes: u64,
+    pub datagram_send_queue_capacity: u64,
     pub congestion_events: u64,
     pub black_holes_detected: u64,
     pub current_mtu: u16,

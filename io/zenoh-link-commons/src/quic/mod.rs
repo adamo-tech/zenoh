@@ -11,6 +11,7 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+pub mod delivery;
 mod plaintext;
 mod socket;
 mod utils;

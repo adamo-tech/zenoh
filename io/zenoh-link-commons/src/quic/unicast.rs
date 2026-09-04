@@ -36,6 +36,7 @@ use zenoh_protocol::core::{Metadata, Priority};
 use zenoh_result::ZResult;
 
 use crate::{
+    quic::delivery::{DeliveryCounters, DeliveryTrackingFactory},
     quic::{
         get_negotiated_alpn, get_quic_addr, get_quic_host,
         plaintext::{PlainTextClientConfig, PlainTextServerConfig},
@@ -51,6 +52,7 @@ use crate::{
 pub struct QuicConnection {
     conn: quinn::Connection,
     closed: Arc<AtomicBool>,
+    delivery: Arc<DeliveryCounters>,
 }
 
 impl fmt::Debug for QuicConnection {
@@ -63,10 +65,11 @@ impl fmt::Debug for QuicConnection {
 }
 
 impl QuicConnection {
-    fn new(conn: quinn::Connection) -> Self {
+    fn new(conn: quinn::Connection, delivery: Arc<DeliveryCounters>) -> Self {
         Self {
             conn,
             closed: Arc::new(AtomicBool::new(false)),
+            delivery,
         }
     }
 
@@ -96,7 +99,14 @@ impl QuicConnection {
             rtt_us: stats.path.rtt.as_micros() as u64,
             cwnd: stats.path.cwnd,
             lost_packets: stats.path.lost_packets,
+            lost_bytes: stats.path.lost_bytes,
             sent_packets: stats.path.sent_packets,
+            delivered_bytes: self.delivery.delivered_bytes(),
+            app_limited_delivered_bytes: self.delivery.app_limited_delivered_bytes(),
+            datagram_send_queue_bytes: (DATAGRAM_SEND_BUFFER_BYTES
+                .saturating_sub(self.conn.datagram_send_buffer_space()))
+                as u64,
+            datagram_send_queue_capacity: DATAGRAM_SEND_BUFFER_BYTES as u64,
             congestion_events: stats.path.congestion_events,
             black_holes_detected: stats.path.black_holes_detected,
             current_mtu: stats.path.current_mtu,
@@ -410,12 +420,20 @@ impl<F: AcceptorCallback> QuicServer<F> {
                 Arc::new(PlainTextServerConfig::new(quic_config.into()))
             }
         });
+        // Every accepted connection gets its own transport config, so its
+        // delivery counters can be its own too.
+        let mtu_conf = QuicMtuConfig::try_from(&epconf)?;
+        let configure_transport: Arc<dyn Fn(&mut quinn::TransportConfig) + Send + Sync> =
+            Arc::new(move |transport_config| {
+                QuicTransportConfigurator(transport_config)
+                    .configure_max_concurrent_streams(streams_conf.as_ref())
+                    .configure_mtu(&mtu_conf);
+            });
         {
             let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-            QuicTransportConfigurator(transport_config)
-                .configure_max_concurrent_streams(streams_conf.as_ref())
-                .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
+            configure_transport(transport_config);
         }
+        let server_config_template = server_config.clone();
         // Initialize the Endpoint
         let quic_endpoint = async {
             let socket = QuicSocketConfig::new(&epconf)
@@ -450,6 +468,8 @@ impl<F: AcceptorCallback> QuicServer<F> {
         Ok(Self {
             quic_acceptor: QuicAcceptor {
                 quic_endpoint,
+                server_config: server_config_template,
+                configure_transport,
                 tls_close_link_on_expiration: server_crypto.tls_close_link_on_expiration,
                 is_streamed,
                 inner: acceptor_params,
@@ -559,8 +579,8 @@ impl QuicClient {
         // Initialize the QUIC connection
         let mut client_crypto =
             TlsClientConfig::new_with_identity(&epconf, is_secure, tls_identity.as_ref())
-            .await
-            .map_err(|e| zerror!("Cannot create a new QUIC client on {dst_addr}: {e}"))?;
+                .await
+                .map_err(|e| zerror!("Cannot create a new QUIC client on {dst_addr}: {e}"))?;
 
         let multistream = if is_streamed {
             let ms_conf = MultiStreamConfig::new(endpoint.metadata())?;
@@ -596,6 +616,7 @@ impl QuicClient {
             .client_config
             .try_into()
             .map_err(|e| zerror!("Can not get QUIC config {host}: {e}"))?;
+        let delivery = Arc::new(DeliveryCounters::default());
         quic_endpoint.set_default_client_config({
             let mut client_config = quinn::ClientConfig::new({
                 if is_secure {
@@ -608,6 +629,11 @@ impl QuicClient {
             QuicTransportConfigurator(&mut transport_config)
                 .configure_max_concurrent_streams(multistream.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
+            transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
+                default_congestion_factory(),
+                delivery.clone(),
+            )));
+            transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
             client_config.transport_config(transport_config.into());
             client_config
         });
@@ -648,7 +674,7 @@ impl QuicClient {
         };
 
         Ok(Self {
-            quic_conn: QuicConnection::new(quic_conn),
+            quic_conn: QuicConnection::new(quic_conn, delivery),
             streams,
             src_addr,
             dst_addr,
@@ -689,6 +715,9 @@ impl<F: AcceptorCallback> fmt::Debug for QuicAcceptorParams<F> {
 
 pub struct QuicAcceptor<F: AcceptorCallback> {
     quic_endpoint: quinn::Endpoint,
+    /// Template for the per-connection server config.
+    server_config: quinn::ServerConfig,
+    configure_transport: Arc<dyn Fn(&mut quinn::TransportConfig) + Send + Sync>,
     tls_close_link_on_expiration: bool,
     is_streamed: bool,
     inner: QuicAcceptorParams<F>,
@@ -710,16 +739,33 @@ impl<F: AcceptorCallback> fmt::Debug for QuicAcceptor<F> {
 
 impl<F: AcceptorCallback> QuicAcceptor<F> {
     pub async fn accept_task(self) -> ZResult<()> {
-        async fn accept_connection(acceptor: quinn::Accept<'_>) -> ZResult<quinn::Connection> {
+        async fn accept_connection(
+            acceptor: quinn::Accept<'_>,
+            template: &quinn::ServerConfig,
+            configure_transport: &(dyn Fn(&mut quinn::TransportConfig) + Send + Sync),
+        ) -> ZResult<(quinn::Connection, Arc<DeliveryCounters>)> {
             let qc = acceptor
                 .await
                 .ok_or_else(|| zerror!("Can not accept QUIC connections: acceptor closed"))?;
 
+            let delivery = Arc::new(DeliveryCounters::default());
+            let mut transport_config = quinn::TransportConfig::default();
+            configure_transport(&mut transport_config);
+            transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
+                default_congestion_factory(),
+                delivery.clone(),
+            )));
+            transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
+            let mut server_config = template.clone();
+            server_config.transport = Arc::new(transport_config);
+
             let conn = qc
+                .accept_with(Arc::new(server_config))
+                .map_err(|e| zerror!("QUIC acceptor failed: {:?}", e))?
                 .await
                 .map_err(|e| zerror!("QUIC acceptor failed: {:?}", e))?;
 
-            Ok(conn)
+            Ok((conn, delivery))
         }
 
         let src_addr = self
@@ -733,10 +779,14 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             tokio::select! {
                 _ = self.inner.token.cancelled() => break,
 
-                res = accept_connection(self.quic_endpoint.accept()) => {
+                res = accept_connection(
+                    self.quic_endpoint.accept(),
+                    &self.server_config,
+                    self.configure_transport.as_ref(),
+                ) => {
                     match res {
-                        Ok(quic_conn) => {
-                            let link = match self.handle_accepted_connection(quic_conn, &src_addr).await {
+                        Ok((quic_conn, delivery)) => {
+                            let link = match self.handle_accepted_connection(quic_conn, delivery, &src_addr).await {
                                 Ok(link) => link,
                                 Err(e) => {
                                     tracing::error!("Cannot accept QUIC connection: {e:?}");
@@ -769,6 +819,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
     async fn handle_accepted_connection(
         &self,
         quic_conn: quinn::Connection,
+        delivery: Arc<DeliveryCounters>,
         src_addr: &SocketAddr,
     ) -> ZResult<LinkUnicast> {
         let streams = if self.is_streamed {
@@ -797,7 +848,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
         };
         let tls_close_link_on_expiration = self.tls_close_link_on_expiration;
         let link = (self.inner.make_link)(QuicLinkMaterial {
-            quic_conn: QuicConnection::new(quic_conn),
+            quic_conn: QuicConnection::new(quic_conn, delivery),
             src_addr,
             dst_addr,
             streams,
@@ -807,6 +858,24 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
 
         Ok(link)
     }
+}
+
+/// How much datagram payload may wait in the connection for the congestion
+/// window to open. Quinn's default of 1 MiB is seconds of video on a narrow
+/// path, all of it stale by the time it goes out; this is a keyframe or two,
+/// and beyond it the oldest datagrams are dropped at the sender.
+const DATAGRAM_SEND_BUFFER_BYTES: usize = 256 * 1024;
+
+/// The controller the delivery wrapper delegates to.
+///
+/// BBR rather than Cubic: this link carries best-effort media as QUIC
+/// DATAGRAMs, and a loss-driven controller reads a lossy radio as
+/// congestion, collapses the window to a handful of packets, and turns
+/// every frame into a multi-round-trip wait. BBR paces to the measured
+/// delivery rate instead, which is what the media layer's own controller
+/// does above it.
+fn default_congestion_factory() -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
+    Arc::new(quinn::congestion::BbrConfig::default())
 }
 
 /// Material for building a link after accepting a new connection on a QUIC listener

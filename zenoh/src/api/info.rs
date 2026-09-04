@@ -325,7 +325,16 @@ pub struct QuicStats {
     pub rtt_us: u64,
     pub cwnd: u64,
     pub lost_packets: u64,
+    pub lost_bytes: u64,
     pub sent_packets: u64,
+    /// Bytes the peer has acknowledged, DATAGRAM frames included.
+    pub delivered_bytes: u64,
+    /// The share of `delivered_bytes` acknowledged while the sender was
+    /// application-limited rather than window-limited.
+    pub app_limited_delivered_bytes: u64,
+    /// Datagram payload waiting for the congestion window, and its cap.
+    pub datagram_send_queue_bytes: u64,
+    pub datagram_send_queue_capacity: u64,
     pub congestion_events: u64,
     pub black_holes_detected: u64,
     pub current_mtu: u16,
@@ -348,7 +357,12 @@ impl From<zenoh_link_commons::QuicStats> for QuicStats {
             rtt_us: stats.rtt_us,
             cwnd: stats.cwnd,
             lost_packets: stats.lost_packets,
+            lost_bytes: stats.lost_bytes,
             sent_packets: stats.sent_packets,
+            delivered_bytes: stats.delivered_bytes,
+            app_limited_delivered_bytes: stats.app_limited_delivered_bytes,
+            datagram_send_queue_bytes: stats.datagram_send_queue_bytes,
+            datagram_send_queue_capacity: stats.datagram_send_queue_capacity,
             congestion_events: stats.congestion_events,
             black_holes_detected: stats.black_holes_detected,
             current_mtu: stats.current_mtu,
