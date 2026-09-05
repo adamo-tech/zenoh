@@ -135,14 +135,24 @@ impl LinkUnicastTrait for LinkUnicastQuicDatagram {
         self.close().await
     }
 
-    async fn write(&self, buffer: &[u8], _priority: Option<Priority>) -> ZResult<usize> {
+    async fn write(&self, buffer: &[u8], priority: Option<Priority>) -> ZResult<usize> {
         let amt = buffer.len();
+        // A refused datagram is shed here, as the network is allowed to shed
+        // it later: best effort means the write succeeded, not that the bytes
+        // arrived. Refusing at the door is what keeps the queue's reserve
+        // free for control, since quinn's FIFO cannot reorder behind it.
+        if !self.connection.admit_datagram(priority, amt) {
+            return Ok(amt);
+        }
         self.connection
             .send_datagram(Bytes::copy_from_slice(buffer))?;
         Ok(amt)
     }
 
-    async fn write_all(&self, buffer: &[u8], _priority: Option<Priority>) -> ZResult<()> {
+    async fn write_all(&self, buffer: &[u8], priority: Option<Priority>) -> ZResult<()> {
+        if !self.connection.admit_datagram(priority, buffer.len()) {
+            return Ok(());
+        }
         self.connection
             .send_datagram(Bytes::copy_from_slice(buffer))?;
         Ok(())

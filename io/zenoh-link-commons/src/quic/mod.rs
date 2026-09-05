@@ -11,9 +11,13 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+mod buffers;
 pub mod delivery;
 mod plaintext;
 mod socket;
 mod utils;
+pub use buffers::{
+    QuicUdpBufferConfig, QUIC_UDP_BUFFER_BYTES, QUIC_UDP_RECV_BUFFER, QUIC_UDP_SEND_BUFFER,
+};
 pub use utils::*;
 pub mod unicast;

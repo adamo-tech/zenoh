@@ -335,6 +335,9 @@ pub struct QuicStats {
     /// Datagram payload waiting for the congestion window, and its cap.
     pub datagram_send_queue_bytes: u64,
     pub datagram_send_queue_capacity: u64,
+    /// Lower-priority datagrams refused at the queue door so the reserve
+    /// stays free for control.
+    pub datagrams_shed: u64,
     pub congestion_events: u64,
     pub black_holes_detected: u64,
     pub current_mtu: u16,
@@ -363,6 +366,7 @@ impl From<zenoh_link_commons::QuicStats> for QuicStats {
             app_limited_delivered_bytes: stats.app_limited_delivered_bytes,
             datagram_send_queue_bytes: stats.datagram_send_queue_bytes,
             datagram_send_queue_capacity: stats.datagram_send_queue_capacity,
+            datagrams_shed: stats.datagrams_shed,
             congestion_events: stats.congestion_events,
             black_holes_detected: stats.black_holes_detected,
             current_mtu: stats.current_mtu,

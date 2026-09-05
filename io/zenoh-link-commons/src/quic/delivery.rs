@@ -39,9 +39,24 @@ use quinn_proto::{
 pub struct DeliveryCounters {
     delivered_bytes: AtomicU64,
     app_limited_delivered_bytes: AtomicU64,
+    datagrams_shed: AtomicU64,
 }
 
 impl DeliveryCounters {
+    /// Datagrams refused at admission because the send queue had fewer free
+    /// bytes than the reserve kept for the top priorities.
+    ///
+    /// A shed is deliberate and local: the frame never entered the queue, so
+    /// it cost the link nothing. It is the signal that lower-priority traffic
+    /// is being offered faster than the window drains it.
+    pub fn datagrams_shed(&self) -> u64 {
+        self.datagrams_shed.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_shed(&self) {
+        self.datagrams_shed.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Bytes the peer has acknowledged so far.
     pub fn delivered_bytes(&self) -> u64 {
         self.delivered_bytes.load(Ordering::Relaxed)

@@ -82,6 +82,24 @@ impl QuicConnection {
         !closed
     }
 
+    /// Whether a datagram of `len` bytes at `priority` may enter the send
+    /// queue now.
+    ///
+    /// The queue is FIFO and blind to priority, so ordering is enforced at
+    /// the door: [`Priority::Control`] and [`Priority::RealTime`] always
+    /// enter, and everything below them is refused while free space is under
+    /// [`DATAGRAM_PRIORITY_RESERVE_BYTES`]. A refusal is counted and is the
+    /// caller's cue to shed the frame, exactly as the network might have.
+    /// `None` is the Control lane.
+    pub fn admit_datagram(&self, priority: Option<Priority>, len: usize) -> bool {
+        // Read the free space only for a priority that is subject to it.
+        let admitted = datagram_admitted(priority, len, || self.conn.datagram_send_buffer_space());
+        if !admitted {
+            self.delivery.record_shed();
+        }
+        admitted
+    }
+
     /// Samples Quinn's live counters without starting a process-global
     /// poller or exposing Quinn types outside the link layer.
     pub fn stats(
@@ -107,6 +125,7 @@ impl QuicConnection {
                 .saturating_sub(self.conn.datagram_send_buffer_space()))
                 as u64,
             datagram_send_queue_capacity: DATAGRAM_SEND_BUFFER_BYTES as u64,
+            datagrams_shed: self.delivery.datagrams_shed(),
             congestion_events: stats.path.congestion_events,
             black_holes_detected: stats.path.black_holes_detected,
             current_mtu: stats.path.current_mtu,
@@ -864,7 +883,99 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
 /// window to open. Quinn's default of 1 MiB is seconds of video on a narrow
 /// path, all of it stale by the time it goes out; this is a keyframe or two,
 /// and beyond it the oldest datagrams are dropped at the sender.
-const DATAGRAM_SEND_BUFFER_BYTES: usize = 256 * 1024;
+/// The most datagram payload that may wait in a connection for the congestion
+/// window. Past this quinn drops the oldest, which sheds stale media at the
+/// sender instead of queueing seconds of it.
+pub const DATAGRAM_SEND_BUFFER_BYTES: usize = 256 * 1024;
+
+/// Free space in the datagram send queue held back for [`Priority::Control`]
+/// and [`Priority::RealTime`].
+///
+/// quinn's queue is a single FIFO with no notion of priority, so without a
+/// reserve a video burst fills it and a control command queues behind up to
+/// [`DATAGRAM_SEND_BUFFER_BYTES`] of picture: seconds, on a slow uplink. With
+/// the reserve, lower priorities are refused once free space falls to this
+/// line, so there is always room for a command to be next out. 32 KiB is
+/// about a hundred and fifty 200-byte commands of headroom, or one eighth of
+/// the queue.
+pub const DATAGRAM_PRIORITY_RESERVE_BYTES: usize = 32 * 1024;
+
+/// The admission decision behind [`QuicConnection::admit_datagram`], with the
+/// queue's free space supplied lazily so a protected priority never reads it.
+///
+/// After a lower-priority admit at least [`DATAGRAM_PRIORITY_RESERVE_BYTES`]
+/// remain free, because admission requires `free >= reserve + len`.
+pub(crate) fn datagram_admitted(
+    priority: Option<Priority>,
+    len: usize,
+    free: impl FnOnce() -> usize,
+) -> bool {
+    let priority = priority.unwrap_or(Priority::Control);
+    if (priority as u8) <= (Priority::RealTime as u8) {
+        return true;
+    }
+    // `checked_add`, not saturating: a frame so large that reserve + len
+    // overflows must refuse, and a saturated sum would compare equal to a
+    // full queue and admit it.
+    match DATAGRAM_PRIORITY_RESERVE_BYTES.checked_add(len) {
+        Some(needed) => free() >= needed,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use zenoh_protocol::core::Priority;
+
+    use super::{datagram_admitted, DATAGRAM_PRIORITY_RESERVE_BYTES};
+
+    const RESERVE: usize = DATAGRAM_PRIORITY_RESERVE_BYTES;
+
+    #[test]
+    fn control_and_real_time_always_enter_without_reading_the_queue() {
+        for priority in [None, Some(Priority::Control), Some(Priority::RealTime)] {
+            assert!(datagram_admitted(priority, 1_200, || {
+                panic!("a protected priority must not consult free space")
+            }));
+        }
+    }
+
+    #[test]
+    fn lower_priorities_are_refused_inside_the_reserve() {
+        assert!(!datagram_admitted(
+            Some(Priority::InteractiveHigh),
+            1_200,
+            || RESERVE
+        ));
+        assert!(!datagram_admitted(
+            Some(Priority::InteractiveHigh),
+            1_200,
+            || RESERVE + 1_199
+        ));
+        assert!(!datagram_admitted(Some(Priority::Background), 1, || 0));
+    }
+
+    #[test]
+    fn lower_priorities_enter_once_the_reserve_would_survive_them() {
+        assert!(datagram_admitted(
+            Some(Priority::InteractiveHigh),
+            1_200,
+            || RESERVE + 1_200
+        ));
+        assert!(datagram_admitted(Some(Priority::Data), 1_200, || usize::MAX));
+    }
+
+    #[test]
+    fn a_datagram_larger_than_all_free_space_never_enters_at_low_priority() {
+        // A full queue with a huge frame must not wrap the arithmetic into an
+        // admit.
+        assert!(!datagram_admitted(
+            Some(Priority::Data),
+            usize::MAX,
+            || usize::MAX
+        ));
+    }
+}
 
 /// The controller the delivery wrapper delegates to.
 ///

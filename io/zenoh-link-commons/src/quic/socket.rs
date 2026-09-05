@@ -18,12 +18,17 @@ use zenoh_core::bail;
 use zenoh_protocol::core::{endpoint::Config, Address};
 use zenoh_result::ZResult;
 
-use crate::{parse_dscp, quic::get_quic_addr, set_dscp, BIND_INTERFACE, BIND_SOCKET};
+use crate::{
+    parse_dscp,
+    quic::{get_quic_addr, QuicUdpBufferConfig},
+    set_dscp, BIND_INTERFACE, BIND_SOCKET,
+};
 
 pub struct QuicSocketConfig<'a> {
     iface: Option<&'a str>,
     bind_socket: Option<SocketAddr>,
     dscp: Option<u32>,
+    buffers: QuicUdpBufferConfig,
 }
 
 impl<'a> QuicSocketConfig<'a> {
@@ -46,6 +51,7 @@ impl<'a> QuicSocketConfig<'a> {
             iface: epconf.get(BIND_INTERFACE),
             bind_socket,
             dscp: parse_dscp(epconf)?,
+            buffers: QuicUdpBufferConfig::try_from(epconf)?,
         })
     }
 
@@ -58,6 +64,7 @@ impl<'a> QuicSocketConfig<'a> {
         if let Some(dscp) = self.dscp {
             set_dscp(&socket, *addr, dscp)?;
         }
+        self.buffers.apply(&socket);
         Ok(socket)
     }
 
@@ -78,6 +85,7 @@ impl<'a> QuicSocketConfig<'a> {
         if let Some(iface) = self.iface {
             zenoh_util::net::set_bind_to_device_udp_socket(&socket, iface)?;
         };
+        self.buffers.apply(&socket);
 
         Ok(socket)
     }

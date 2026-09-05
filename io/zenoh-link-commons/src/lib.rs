@@ -79,6 +79,9 @@ pub struct QuicStats {
     /// to open, and the most that may wait before the oldest is dropped.
     pub datagram_send_queue_bytes: u64,
     pub datagram_send_queue_capacity: u64,
+    /// Lower-priority datagrams refused at the queue door to keep the
+    /// reserve free for control. Never entered the queue, cost nothing.
+    pub datagrams_shed: u64,
     pub congestion_events: u64,
     pub black_holes_detected: u64,
     pub current_mtu: u16,
