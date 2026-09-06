@@ -36,10 +36,10 @@ use arc_swap::ArcSwapOption;
 
 mod low_pass;
 use low_pass::low_pass_interceptor_factories;
-use zenoh_config::{Config, InterceptorFlow, InterceptorLink};
+use zenoh_config::{Config, InterceptorFlow, InterceptorLink, ModeDependent, Permission};
 use zenoh_keyexpr::{keyexpr, OwnedKeyExpr};
 use zenoh_protocol::network::NetworkMessageMut;
-use zenoh_result::ZResult;
+use zenoh_result::{bail, ZResult};
 use zenoh_transport::{multicast::TransportMulticast, unicast::TransportUnicast};
 
 pub mod downsampling;
@@ -90,6 +90,7 @@ impl From<&LinkAuthId> for InterceptorLinkWrapper {
             LinkAuthId::UnixsockStream => Self(InterceptorLink::UnixsockStream),
             LinkAuthId::Vsock => Self(InterceptorLink::Vsock),
             LinkAuthId::Ws => Self(InterceptorLink::Ws),
+            LinkAuthId::WebTransport(_) => Self(InterceptorLink::Webtransport),
         }
     }
 }
@@ -129,6 +130,22 @@ pub(crate) type InterceptorFactory = Box<dyn InterceptorFactoryTrait + Send + Sy
 
 pub(crate) fn interceptor_factories(config: &Config) -> ZResult<Vec<InterceptorFactory>> {
     let mut res: Vec<InterceptorFactory> = vec![];
+    let listen = config.listen().endpoints();
+    let has_webtransport = [listen.router(), listen.peer(), listen.client()]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|endpoint| endpoint.protocol().as_str() == "webtransport");
+    let acl = config.access_control();
+    if has_webtransport
+        && (!acl.enabled
+            || !acl.adamo_tenant_scope_from_identity
+            || acl.default_permission != Permission::Deny)
+    {
+        bail!(
+            "WebTransport listeners require enabled, default-deny access control with adamo_tenant_scope_from_identity=true"
+        );
+    }
     // Uncomment to log the interceptors initialisation
     // res.push(Box::new(LoggerInterceptor {}));
     #[cfg(test)]

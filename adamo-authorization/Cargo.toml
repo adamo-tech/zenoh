@@ -1,0 +1,13 @@
+[package]
+name = "adamo-authorization"
+version = "0.1.0"
+edition = "2021"
+description = "Shared, operation-aware authorization policy for Adamo browser ingresses"
+publish = false
+
+[dependencies]
+zenoh-keyexpr = { path = "../commons/zenoh-keyexpr" }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

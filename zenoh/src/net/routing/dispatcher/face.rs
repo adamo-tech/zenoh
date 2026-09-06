@@ -15,7 +15,10 @@ use std::{
     any::Any,
     collections::HashMap,
     fmt::{self, Debug},
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
     time::Duration,
 };
 
@@ -124,6 +127,7 @@ pub struct FaceState {
     pub(crate) pending_current_interests: HashMap<InterestId, PendingCurrentInterest>,
     pub(crate) local_mappings: IntHashMap<ExprId, Arc<Resource>>,
     pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,
+    pub(crate) expr_id_exhausted: AtomicBool,
     pub(crate) next_qid: RequestId,
     /// Pending queries sent to this face.
     ///
@@ -165,6 +169,7 @@ impl FaceStateBuilder {
             pending_current_interests: HashMap::new(),
             local_mappings: IntHashMap::new(),
             remote_mappings: IntHashMap::new(),
+            expr_id_exhausted: AtomicBool::new(false),
             next_qid: 0,
             pending_queries: HashMap::new(),
             mcast_group: None,
@@ -236,12 +241,13 @@ impl FaceState {
         }
     }
 
-    pub(crate) fn get_next_local_id(&self) -> ExprId {
-        let mut id = 1;
-        while self.local_mappings.contains_key(&id) || self.remote_mappings.contains_key(&id) {
-            id += 1;
+    pub(crate) fn get_next_local_id(&self) -> Option<ExprId> {
+        if self.expr_id_exhausted.load(Ordering::Relaxed) {
+            return None;
         }
-        id
+        next_unused_expr_id(|id| {
+            self.local_mappings.contains_key(&id) || self.remote_mappings.contains_key(&id)
+        })
     }
 
     pub(crate) fn update_interceptors_caches(&self, res: &mut Arc<Resource>) {
@@ -337,6 +343,42 @@ impl FaceState {
                 .expect("face in_interceptors should not be None when mcast_group is set")
                 .store(interceptor.into());
         }
+    }
+}
+
+fn next_unused_expr_id(mut occupied: impl FnMut(ExprId) -> bool) -> Option<ExprId> {
+    (1..=ExprId::MAX).find(|id| !occupied(*id))
+}
+
+#[cfg(test)]
+mod expr_id_tests {
+    use super::next_unused_expr_id;
+    use zenoh_protocol::core::ExprId;
+
+    #[test]
+    fn expression_id_search_never_returns_the_reserved_zero_id() {
+        assert_eq!(next_unused_expr_id(|_| false), Some(1));
+    }
+
+    #[test]
+    fn expression_id_search_can_use_the_last_protocol_id() {
+        assert_eq!(
+            next_unused_expr_id(|id| id != ExprId::MAX),
+            Some(ExprId::MAX)
+        );
+    }
+
+    #[test]
+    fn expression_id_search_terminates_when_the_protocol_space_is_full() {
+        let mut visited = 0usize;
+        assert_eq!(
+            next_unused_expr_id(|_| {
+                visited += 1;
+                true
+            }),
+            None
+        );
+        assert_eq!(visited, ExprId::MAX as usize);
     }
 }
 

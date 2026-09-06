@@ -343,6 +343,7 @@ pub enum InterceptorLink {
     UnixsockStream,
     Vsock,
     Ws,
+    Webtransport,
 }
 
 impl std::fmt::Display for InterceptorLink {
@@ -925,6 +926,10 @@ validated_struct::validator! {
         pub access_control: AclConfig {
             pub enabled: bool,
             pub default_permission: Permission,
+            /// Derive an unmatched authenticated tenant's scope from its
+            /// normalized identity. Transport adapters decide how identity is
+            /// authenticated; static subjects remain reserved for services.
+            pub adamo_tenant_scope_from_identity: bool,
             pub rules: Option<Vec<AclConfigRule>>,
             pub subjects: Option<Vec<AclConfigSubjects>>,
             pub policies: Option<Vec<AclConfigPolicyEntry>>,
