@@ -27,7 +27,10 @@ use zenoh_protocol::{
     core::{key_expr::keyexpr, ExprId, Region, WireExpr},
     network::{
         self,
-        declare::{self, queryable::ext::QueryableInfoType, Declare, DeclareBody, DeclareKeyExpr},
+        declare::{
+            self, queryable::ext::QueryableInfoType, Declare, DeclareBody, DeclareKeyExpr,
+            UndeclareKeyExpr,
+        },
         interest::InterestId,
         Mapping, RequestId,
     },
@@ -531,12 +534,86 @@ impl Resource {
         })
     }
 
+    /// Undeclares the wire-expression mappings this router itself declared to remote
+    /// faces for `res` once nothing else references the resource.
+    ///
+    /// `decl_key` allocates an id and stores an `Arc<Resource>` in the destination
+    /// face's `local_mappings` for every key expression forwarded over a link. Those
+    /// entries were only ever removed when the face closed, so on long-lived
+    /// router-to-router links every key ever declared stayed pinned in the routing
+    /// tree forever: the tree, the per-link id maps, and the matches lists of every
+    /// wildcard resource grew without bound until the process was restarted.
+    ///
+    /// Must be called with the tables write lock held, like `clean`. Returns true
+    /// when at least one mapping was released.
+    fn release_local_mappings(res: &mut Arc<Resource>) -> bool {
+        if !res.children.is_empty() {
+            // A mapping on this node may still serve as the declared prefix of a
+            // wildcard child; the parent is re-evaluated once its children are gone.
+            return false;
+        }
+        let holders: Vec<FaceId> = res
+            .face_ctxs
+            .values()
+            .filter(|ctx| ctx.local_expr_id.is_some())
+            .map(|ctx| ctx.face.id)
+            .collect();
+        if holders.is_empty() {
+            return false;
+        }
+        // Strong references: the parent's children map, the caller's `res`, the
+        // `resclone` held by `clean`, plus one `local_mappings` entry per holder.
+        // Anything beyond that (subscribers, tokens, queryables, interests, remote
+        // mappings, hat state) means the resource is still in use.
+        if Arc::strong_count(res) > 3 + holders.len() {
+            return false;
+        }
+        let expr = res.expr().to_string();
+        for face_id in holders {
+            let Some(ctx) = get_mut_unchecked(res).face_ctxs.get_mut(&face_id) else {
+                continue;
+            };
+            let Some(expr_id) = get_mut_unchecked(ctx).local_expr_id.take() else {
+                continue;
+            };
+            let mut face = ctx.face.clone();
+            let removed = get_mut_unchecked(&mut face).local_mappings.remove(&expr_id);
+            debug_assert!(removed.is_some(), "local mapping {expr_id} missing on {face}");
+            face.expr_id_exhausted.store(false, Ordering::Relaxed);
+            let ctx_unused = ctx.remote_expr_id.is_none()
+                && ctx.subs.is_none()
+                && ctx.qabl.is_none()
+                && !ctx.token;
+            if ctx_unused {
+                get_mut_unchecked(res).face_ctxs.remove(&face_id);
+            }
+            tracing::debug!(
+                face_id,
+                face_zid = %face.zid,
+                expr_id,
+                "Undeclare local wire expression {expr}"
+            );
+            face.primitives.send_declare(RoutingContext::with_expr(
+                &mut Declare {
+                    interest_id: None,
+                    ext_qos: declare::ext::QoSType::DECLARE,
+                    ext_tstamp: None,
+                    ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+                    body: DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id: expr_id }),
+                },
+                expr.clone(),
+            ));
+        }
+        true
+    }
+
     #[tracing::instrument(level = "trace")]
     pub fn clean(res: &mut Arc<Resource>) {
         let mut resclone = res.clone();
         let mutres = get_mut_unchecked(&mut resclone);
         if let Some(ref mut parent) = mutres.parent {
             tracing::trace!(strong_count = Arc::strong_count(res));
+            Resource::release_local_mappings(res);
             if Arc::strong_count(res) <= 3 && res.children.is_empty() {
                 // consider only childless resource held by only one external object (+ 1 strong count for resclone, + 1 strong count for res.parent to a total of 3 )
                 tracing::debug!("Unregister resource {}", res.expr());

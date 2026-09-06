@@ -331,3 +331,79 @@ fn test_duplicate_queryable_undeclaration() {
 
     assert_eq!(c0.recorder().requests().len(), 1);
 }
+
+/// Regression: key expressions forwarded over a router-to-router link must be released once
+/// nothing references them. Previously every key ever declared stayed pinned in the peer
+/// face's `local_mappings` (and therefore in the routing tree) until the link closed, so
+/// per-session unique keys grew router memory and declaration cost without bound.
+#[test]
+fn test_r2r_key_expressions_are_released_when_unused() {
+    use crate::net::routing::dispatcher::resource::Resource;
+
+    try_init_tracing_subscriber();
+
+    let r0 = HarnessBuilder::new()
+        .mode(WhatAmI::Router)
+        .subregions([Region::Local])
+        .build();
+    let r1 = HarnessBuilder::new()
+        .mode(WhatAmI::Router)
+        .subregions([Region::Local])
+        .build();
+
+    let mut r0_r1 = Connection {
+        a: &r0,
+        b: &r1,
+        a2b: FaceDef::default().mode(WhatAmI::Router),
+        b2a: FaceDef::default().mode(WhatAmI::Router),
+    }
+    .establish();
+    r0_r1.bi_fwd();
+
+    let key = |i: u32| WireExpr {
+        scope: 0,
+        suffix: format!("adamo/_time/pong/{i}").into(),
+        mapping: Mapping::Sender,
+    };
+    let in_tree = |harness: &super::Harness, i: u32| {
+        let tables = harness.gateway.tables.tables.read().unwrap();
+        Resource::get_resource(tables.data._get_root(), &format!("adamo/_time/pong/{i}"))
+            .is_some()
+    };
+
+    let session = r0.new_session();
+    for i in 0..3 {
+        session.declare_subscriber(None, i, key(i));
+        r0_r1.bi_fwd();
+    }
+
+    let a2b = r0_r1.a2b.face.state.clone();
+    let b2a = r0_r1.b2a.face.state.clone();
+    assert_eq!(a2b.local_mappings.len(), 3, "r0 declared one wire expr per key to r1");
+    assert_eq!(b2a.remote_mappings.len(), 3, "r1 registered the declared wire exprs");
+    assert!((0..3).all(|i| in_tree(&r0, i) && in_tree(&r1, i)));
+
+    for i in 0..3 {
+        session.undeclare_subscriber(i);
+        r0_r1.bi_fwd();
+    }
+
+    assert_eq!(
+        a2b.local_mappings.len(),
+        0,
+        "unused wire exprs must be undeclared to the peer and dropped"
+    );
+    assert_eq!(b2a.remote_mappings.len(), 0, "r1 must process the UndeclareKeyExpr");
+    assert!(
+        (0..3).all(|i| !in_tree(&r0, i) && !in_tree(&r1, i)),
+        "released resources must leave both routing trees"
+    );
+
+    // Ids are handed out monotonically so a released id is not immediately reused while
+    // data carrying it may still be in flight.
+    session.declare_subscriber(None, 10, key(10));
+    r0_r1.bi_fwd();
+    let ids: Vec<_> = a2b.local_mappings.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids.len(), 1);
+    assert!(ids[0] > 3, "expected a fresh id, got {}", ids[0]);
+}

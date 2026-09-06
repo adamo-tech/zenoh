@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     fmt::{self, Debug},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
         Arc, Weak,
     },
     time::Duration,
@@ -128,6 +128,11 @@ pub struct FaceState {
     pub(crate) local_mappings: IntHashMap<ExprId, Arc<Resource>>,
     pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,
     pub(crate) expr_id_exhausted: AtomicBool,
+    /// Next candidate for a locally allocated wire-expression id. Ids are handed out
+    /// monotonically (wrapping at the protocol maximum) rather than lowest-free so that
+    /// an id released by `Resource::clean` is not reused while data carrying it may
+    /// still be in flight on a lower-priority stream.
+    pub(crate) next_local_expr_id: AtomicU16,
     pub(crate) next_qid: RequestId,
     /// Pending queries sent to this face.
     ///
@@ -170,6 +175,7 @@ impl FaceStateBuilder {
             local_mappings: IntHashMap::new(),
             remote_mappings: IntHashMap::new(),
             expr_id_exhausted: AtomicBool::new(false),
+            next_local_expr_id: AtomicU16::new(1),
             next_qid: 0,
             pending_queries: HashMap::new(),
             mcast_group: None,
@@ -245,9 +251,13 @@ impl FaceState {
         if self.expr_id_exhausted.load(Ordering::Relaxed) {
             return None;
         }
-        next_unused_expr_id(|id| {
+        let start = self.next_local_expr_id.load(Ordering::Relaxed);
+        let id = next_unused_expr_id_from(start, |id| {
             self.local_mappings.contains_key(&id) || self.remote_mappings.contains_key(&id)
-        })
+        })?;
+        let next = if id == ExprId::MAX { 1 } else { id + 1 };
+        self.next_local_expr_id.store(next, Ordering::Relaxed);
+        Some(id)
     }
 
     pub(crate) fn update_interceptors_caches(&self, res: &mut Arc<Resource>) {
@@ -346,14 +356,45 @@ impl FaceState {
     }
 }
 
-fn next_unused_expr_id(mut occupied: impl FnMut(ExprId) -> bool) -> Option<ExprId> {
-    (1..=ExprId::MAX).find(|id| !occupied(*id))
+fn next_unused_expr_id(occupied: impl FnMut(ExprId) -> bool) -> Option<ExprId> {
+    next_unused_expr_id_from(1, occupied)
+}
+
+/// Finds the first unused id at or after `start`, wrapping around to 1 (0 is reserved)
+/// so that the whole protocol space is visited exactly once.
+fn next_unused_expr_id_from(
+    start: ExprId,
+    mut occupied: impl FnMut(ExprId) -> bool,
+) -> Option<ExprId> {
+    let start = start.max(1);
+    (start..=ExprId::MAX)
+        .chain(1..start)
+        .find(|id| !occupied(*id))
 }
 
 #[cfg(test)]
 mod expr_id_tests {
-    use super::next_unused_expr_id;
+    use super::{next_unused_expr_id, next_unused_expr_id_from};
     use zenoh_protocol::core::ExprId;
+
+    #[test]
+    fn expression_id_search_starts_at_the_cursor_and_wraps() {
+        assert_eq!(next_unused_expr_id_from(10, |_| false), Some(10));
+        assert_eq!(
+            next_unused_expr_id_from(ExprId::MAX, |id| id == ExprId::MAX),
+            Some(1)
+        );
+        assert_eq!(next_unused_expr_id_from(0, |_| false), Some(1));
+        let mut visited = 0usize;
+        assert_eq!(
+            next_unused_expr_id_from(1234, |_| {
+                visited += 1;
+                true
+            }),
+            None
+        );
+        assert_eq!(visited, ExprId::MAX as usize);
+    }
 
     #[test]
     fn expression_id_search_never_returns_the_reserved_zero_id() {
