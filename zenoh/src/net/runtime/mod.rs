@@ -54,6 +54,7 @@ use zenoh_core::polyfill::*;
 use zenoh_core::{Resolvable, Wait};
 use zenoh_keyexpr::OwnedNonWildKeyExpr;
 use zenoh_link::EndPoint;
+#[cfg(feature = "plugins")]
 use zenoh_plugin_trait::{PluginStartArgs, StructVersion};
 use zenoh_protocol::{
     core::{Locator, Region, WhatAmI, ZenohIdProto},
@@ -898,6 +899,7 @@ impl Deref for DynamicRuntime {
     }
 }
 
+#[cfg(feature = "plugins")]
 impl StructVersion for DynamicRuntime {
     fn struct_version() -> &'static str {
         crate::GIT_VERSION
@@ -907,6 +909,7 @@ impl StructVersion for DynamicRuntime {
     }
 }
 
+#[cfg(feature = "plugins")]
 impl PluginStartArgs for DynamicRuntime {}
 
 #[derive(Clone)]

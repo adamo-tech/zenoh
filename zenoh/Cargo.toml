@@ -50,7 +50,7 @@ internal = [
   "zenoh-protocol/internal",
 ]
 internal_config = []
-plugins = []
+plugins = ["dep:zenoh-plugin-trait"]
 runtime_plugins = ["plugins"]
 shared-memory = [
   "zenoh-buffers/shared-memory",
@@ -122,7 +122,7 @@ zenoh-keyexpr = { workspace = true, features = ["internal"] }
 zenoh-link = { workspace = true }
 zenoh-link-commons = { workspace = true }
 zenoh-macros = { workspace = true }
-zenoh-plugin-trait = { workspace = true }
+zenoh-plugin-trait = { workspace = true, optional = true }
 zenoh-protocol = { workspace = true, features = ["std"] }
 zenoh-result = { workspace = true }
 zenoh-runtime = { workspace = true }
