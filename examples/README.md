@@ -257,6 +257,61 @@
    z_pub_shm_thr
    ```
 
+### z_bench_server & z_bench_client
+
+   RTT/throughput benchmark harness, more configurable than [z_pub_thr / z_sub_thr](#z_pub_thr--z_sub_thr).
+   `z_bench_server` declares the `bench/*` key expressions and answers back (with an ack `put`
+   for the `pubsub` pattern, or a reply for the `query` pattern) so `z_bench_client` can measure
+   round-trip latency and throughput. Payloads carry a 16-byte header (sequence number + send
+   timestamp) that the client uses to compute per-message RTT; `--size` must be at least 16.
+
+   `z_bench_client` supports two load-generation modes and two messaging patterns, independently:
+
+   - `--load closed --window W --batch B`: closed-loop, keeps at most `W` messages in flight,
+     sending `B` messages back-to-back whenever the window has room. Reports achieved rate and
+     RTT percentiles.
+   - `--load open --rate R --batch B`: open-loop, offers a fixed rate of `R` messages/second
+     (sent in bursts of `B`), independent of how fast acks/replies come back. Useful for finding
+     the rate at which latency starts to blow up.
+   - `--pattern pubsub`: publish on `bench/data`, server acks on `bench/ack`.
+   - `--pattern query`: `get` on `bench/query`, server replies inline.
+
+   That gives four combinations: `pubsub`+`closed`, `pubsub`+`open`, `query`+`closed`,
+   `query`+`open`. Add `--duration` (measured seconds), `--warmup` (seconds excluded from stats),
+   and `--csv <path>` to append a row of knobs + measured metrics (throughput, RTT p50/p99/p999/max)
+   to a CSV file for later comparison across runs.
+
+   **TCP** — server and client, closed-loop pubsub:
+
+   ```bash
+   z_bench_server --pattern pubsub -l tcp/127.0.0.1:7447 --no-multicast-scouting &
+   z_bench_client --pattern pubsub --load closed --window 64 --batch 8 --size 1024 \
+     --duration 10 --csv bench.csv -e tcp/127.0.0.1:7447 --no-multicast-scouting
+   ```
+
+   **WebTransport** — same, over the `webtransport` link (requires building with
+   `-F transport_webtransport`; see `io/zenoh-links/zenoh-link-webtransport/DEMO.md` for demo
+   certificate generation):
+
+   ```bash
+   z_bench_server --pattern pubsub \
+     -l 'webtransport/127.0.0.1:7447#listen_certificate_file=.demo-certs/cert.pem;listen_private_key_file=.demo-certs/key.pem' \
+     --no-multicast-scouting &
+   z_bench_client --pattern pubsub --load closed --window 64 --batch 8 --size 1024 \
+     --duration 10 --csv bench-wt.csv \
+     -e 'webtransport/localhost:7447#root_ca_certificate_file=.demo-certs/cert.pem' \
+     --no-multicast-scouting
+   ```
+
+   Rate sweep (open loop, sweeping offered rate, appending each result to `sweep.csv`):
+
+   ```bash
+   for rate in 1000 10000 100000 1000000; do
+     target/release/examples/z_bench_client --load open --rate $rate --batch 16 --size 256 \
+       --duration 10 --csv sweep.csv -e tcp/127.0.0.1:7447 --no-multicast-scouting
+   done
+   ```
+
 ### z_liveliness
 
    Declares a liveliness token on a given key expression (`group1/zenoh-rs` by default).

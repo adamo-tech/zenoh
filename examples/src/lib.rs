@@ -6,6 +6,8 @@
 use serde_json::json;
 use zenoh::{config::WhatAmI, Config};
 
+pub mod bench;
+
 #[derive(clap::Parser, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CommonArgs {
     #[arg(short, long)]
