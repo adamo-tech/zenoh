@@ -659,7 +659,7 @@ impl Resource {
 
     #[inline]
     pub fn decl_key(res: &Arc<Resource>, face: &mut Arc<FaceState>) -> WireExpr<'static> {
-        if face.is_local {
+        if face.is_local || !face.wire_mappings {
             return res.expr().to_string().into();
         }
 
