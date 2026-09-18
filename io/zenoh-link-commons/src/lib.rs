@@ -107,6 +107,10 @@ pub struct Link {
     pub auth_identifier: LinkAuthId,
     pub priorities: Option<PriorityRange>,
     pub reliability: Option<Reliability>,
+    /// The link carries each priority on its own independently ordered stream
+    /// (QUIC multistream). Messages of different priorities can then be
+    /// delivered out of order relative to each other.
+    pub supports_priorities: bool,
 }
 
 #[async_trait]
@@ -144,6 +148,7 @@ impl Link {
             auth_identifier: link.get_auth_id().clone(),
             priorities,
             reliability,
+            supports_priorities: link.supports_priorities(),
         }
     }
 
@@ -160,6 +165,7 @@ impl Link {
             auth_identifier: link.get_auth_id().clone(),
             priorities: None,
             reliability: None,
+            supports_priorities: false,
         }
     }
 

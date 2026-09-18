@@ -278,6 +278,20 @@ impl Gateway {
 
         let ingress = Arc::new(ArcSwapOption::new(InterceptorsChain::empty().into()));
         let mux = Arc::new(Mux::new(transport.clone(), InterceptorsChain::empty()));
+        // A link that splits priorities across independent streams cannot
+        // order a key-expression declaration ahead of the data that uses its
+        // id, so such faces are addressed with full key expressions only.
+        let wire_mappings = !transport
+            .get_links()
+            .map(|links| links.iter().any(|link| link.supports_priorities))
+            .unwrap_or(false);
+        if !wire_mappings {
+            tracing::debug!(
+                "Face {} ({}) uses priority streams: wire-expression mappings disabled",
+                fid,
+                zid
+            );
+        }
 
         #[cfg(feature = "stats")]
         let stats = transport.get_stats().ok();
@@ -296,6 +310,7 @@ impl Gateway {
                     tables.hats.map_ref(|hat| hat.new_face()),
                 )
                 .whatami(whatami)
+                .wire_mappings(wire_mappings)
                 .ingress_interceptors(ingress.clone());
 
                 #[cfg(feature = "stats")]

@@ -124,6 +124,13 @@ pub struct FaceState {
     pub(crate) pending_current_interests: HashMap<InterestId, PendingCurrentInterest>,
     pub(crate) local_mappings: IntHashMap<ExprId, Arc<Resource>>,
     pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,
+    /// Whether this router declares wire-expression ids (`DeclareKeyExpr`) to
+    /// the face and then refers to them from data. It is false for transports
+    /// whose links deliver priorities on independent streams: the declare
+    /// travels on the control stream while the data that uses the id travels
+    /// on a data stream, so the receiver can see the data first and drop it
+    /// as an unknown scope. Such faces always receive full key expressions.
+    pub(crate) wire_mappings: bool,
     pub(crate) next_qid: RequestId,
     /// Pending queries sent to this face.
     ///
@@ -165,6 +172,7 @@ impl FaceStateBuilder {
             pending_current_interests: HashMap::new(),
             local_mappings: IntHashMap::new(),
             remote_mappings: IntHashMap::new(),
+            wire_mappings: true,
             next_qid: 0,
             pending_queries: HashMap::new(),
             mcast_group: None,
@@ -192,6 +200,11 @@ impl FaceStateBuilder {
 
     pub(crate) fn multicast_group(mut self, mcast_group: TransportMulticast) -> Self {
         self.0.mcast_group = Some(mcast_group);
+        self
+    }
+
+    pub(crate) fn wire_mappings(mut self, wire_mappings: bool) -> Self {
+        self.0.wire_mappings = wire_mappings;
         self
     }
 

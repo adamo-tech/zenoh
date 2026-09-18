@@ -1054,3 +1054,64 @@ fn big_key_expr() {
     res.get_best_key("/a", face.state.id + 1);
     Resource::get_matches(&face.tables.tables.read().unwrap().data, &key_expr);
 }
+
+/// A face whose links deliver priorities on independent streams (QUIC
+/// multistream) must never be addressed through wire-expression ids: the
+/// `DeclareKeyExpr` would travel on the control stream while the data using
+/// the id travels on a data stream, and the receiver can drop the data as an
+/// unknown scope. Such faces get full key expressions; ordinary faces keep
+/// the id mapping.
+#[test]
+fn priority_stream_faces_get_full_key_expressions() {
+    use zenoh_protocol::core::Bound;
+
+    use crate::net::routing::dispatcher::{face::FaceStateBuilder, resource::Resource};
+
+    let router = new_router();
+    let tables = router.tables.clone();
+    let mut wtables = zwrite!(tables.tables);
+    let tables_mut = &mut *wtables;
+    let mut root = tables_mut.data.root_res.clone();
+    let res = Resource::make_resource(tables_mut, &mut root, "demo/wire/mappings");
+
+    let make_face = |tables_mut: &mut crate::net::routing::dispatcher::tables::Tables,
+                     wire_mappings: bool| {
+        Arc::new(
+            FaceStateBuilder::new(
+                tables_mut.data.new_face_id(),
+                tables_mut.data.zid,
+                Region::Local,
+                Bound::North,
+                Arc::new(DummyPrimitives {}),
+                tables_mut.hats.map_ref(|hat| hat.new_face()),
+            )
+            .whatami(WhatAmI::Router)
+            .wire_mappings(wire_mappings)
+            .build(),
+        )
+    };
+
+    // Both faces expressed interest in every key, which is what lets a
+    // south-bound face receive id mappings at all.
+    let mut plain = make_face(tables_mut, true);
+    zenoh_sync::get_mut_unchecked(&mut plain)
+        .remote_key_interests
+        .insert(0, None);
+    let plain_key = Resource::decl_key(&res, &mut plain);
+    assert_ne!(plain_key.scope, EMPTY_EXPR_ID, "an ordinary face gets an id mapping");
+    assert_eq!(plain_key.mapping, Mapping::Sender);
+    assert_eq!(plain.local_mappings.len(), 1);
+
+    let mut streams = make_face(tables_mut, false);
+    zenoh_sync::get_mut_unchecked(&mut streams)
+        .remote_key_interests
+        .insert(0, None);
+    let streams_key = Resource::decl_key(&res, &mut streams);
+    assert_eq!(streams_key.scope, EMPTY_EXPR_ID, "a priority-stream face gets no id mapping");
+    assert_eq!(streams_key.suffix.as_ref(), "demo/wire/mappings");
+    assert!(streams.local_mappings.is_empty());
+    // Data toward that face falls back to the full key expression as well.
+    let best = res.get_best_key("", streams.id);
+    assert_eq!(best.scope, EMPTY_EXPR_ID);
+    assert_eq!(best.suffix.as_ref(), "demo/wire/mappings");
+}
