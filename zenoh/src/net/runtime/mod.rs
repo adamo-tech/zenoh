@@ -189,6 +189,9 @@ pub(crate) struct RuntimeState {
     start_conditions: Arc<StartConditions>,
     pending_connections: tokio::sync::Mutex<HashSet<ZenohIdProto>>,
     link_replacement: tokio::sync::Mutex<()>,
+    // (src, dst) of links a TLS identity replacement is retiring; their close
+    // must not trigger a reconnect, or the old identity comes back as a duplicate link.
+    retiring_links: std::sync::Mutex<Vec<(Locator, Locator)>>,
     namespace: Option<OwnedNonWildKeyExpr>,
     #[cfg(feature = "stats")]
     stats: zenoh_stats::StatsRegistry,
@@ -829,6 +832,7 @@ impl RuntimeBuilder {
                 start_conditions: Arc::new(StartConditions::default()),
                 pending_connections: tokio::sync::Mutex::new(HashSet::new()),
                 link_replacement: tokio::sync::Mutex::new(()),
+                retiring_links: std::sync::Mutex::new(Vec::new()),
                 namespace,
                 #[cfg(feature = "stats")]
                 stats,
@@ -954,7 +958,7 @@ impl Runtime {
                 .cloned()
                 .collect::<Vec<_>>();
             for endpoint in endpoints {
-                dialed.push((transport.get_zid()?, endpoint));
+                dialed.push((transport.clone(), endpoint));
             }
         }
         if dialed.len() != 1 {
@@ -963,13 +967,25 @@ impl Runtime {
                 dialed.len()
             )
         }
-        let (expected_zid, endpoint) = dialed.remove(0);
+        let (transport, endpoint) = dialed.remove(0);
+        let expected_zid = transport.get_zid()?;
         let identity =
             zenoh_link_commons::tls::TlsClientIdentity::from_pem(certificate_pem, private_key_pem)
                 .map_err(|error| zenoh_result::zerror!("{error}"))?;
-        self.manager()
+        let retiring = transport
+            .get_links()?
+            .into_iter()
+            .map(|link| (link.src, link.dst))
+            .collect::<Vec<_>>();
+        zlock!(self.state.retiring_links).extend(retiring.iter().cloned());
+        let result = self
+            .manager()
             .replace_transport_unicast_tls_link(endpoint, &expected_zid, identity)
-            .await?;
+            .await;
+        if result.is_err() {
+            zlock!(self.state.retiring_links).retain(|link| !retiring.contains(link));
+        }
+        result?;
         Ok(())
     }
 
@@ -1251,7 +1267,22 @@ impl TransportPeerEventHandler for RuntimeSession {
         for handler in &self.slave_handlers {
             handler.del_link(link.clone());
         }
-        Runtime::closed_link(self, link.dst.to_endpoint());
+        let retired = {
+            let mut retiring = zlock!(self.runtime.state.retiring_links);
+            match retiring
+                .iter()
+                .position(|(src, dst)| *src == link.src && *dst == link.dst)
+            {
+                Some(index) => {
+                    retiring.swap_remove(index);
+                    true
+                }
+                None => false,
+            }
+        };
+        if !retired {
+            Runtime::closed_link(self, link.dst.to_endpoint());
+        }
     }
 
     fn closed(&self) {

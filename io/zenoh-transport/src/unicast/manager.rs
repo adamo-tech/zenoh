@@ -112,6 +112,11 @@ pub struct TransportManagerStateUnicast {
     // Active authenticators
     #[cfg(feature = "transport_auth")]
     pub(super) authenticator: Arc<Auth>,
+    // Client identity installed by the latest TLS link replacement; later
+    // TLS or QUIC dials (reconnects) present it instead of the configured one.
+    #[cfg(any(feature = "transport_quic", feature = "transport_tls"))]
+    pub(super) tls_connect_identity:
+        Arc<std::sync::Mutex<Option<zenoh_link_commons::tls::TlsClientIdentity>>>,
 }
 
 impl fmt::Debug for TransportManagerStateUnicast {
@@ -309,6 +314,8 @@ impl TransportManagerBuilderUnicast {
             multilink: Arc::new(MultiLink::make(prng, config.max_links > 1)?),
             #[cfg(feature = "transport_auth")]
             authenticator: Arc::new(self.authenticator),
+            #[cfg(any(feature = "transport_quic", feature = "transport_tls"))]
+            tls_connect_identity: Arc::new(std::sync::Mutex::new(None)),
         };
 
         let params = TransportManagerParamsUnicast { config, state };
@@ -879,21 +886,40 @@ impl TransportManager {
 
         let transport = tokio::time::timeout(self.config.unicast.open_timeout, async {
             let link = manager
-                .new_link_with_tls_identity(endpoint.clone(), identity)
+                .new_link_with_tls_identity(endpoint.clone(), identity.clone())
                 .await?;
-            super::establishment::open::open_link(
-                endpoint,
-                link,
-                self,
-                Some(expected_zid),
-            )
-            .await
+            super::establishment::open::open_link(endpoint, link, self, Some(expected_zid)).await
         })
         .await
         .map_err(|error| zerror!("{error}"))??;
 
+        *self.state.unicast.tls_connect_identity.lock().unwrap() = Some(identity);
         transport.make_before_break(previous_links).await?;
         Ok(transport)
+    }
+
+    /// Dial `endpoint`, presenting the replacement TLS client identity when one
+    /// has been installed, so a reconnect after rotation does not fall back to
+    /// the configured (possibly expired) certificate.
+    async fn new_link_unicast(
+        &self,
+        manager: &LinkManagerUnicast,
+        endpoint: EndPoint,
+    ) -> ZResult<LinkUnicast> {
+        #[cfg(any(feature = "transport_quic", feature = "transport_tls"))]
+        if matches!(endpoint.protocol().as_str(), "quic" | "tls") {
+            let identity = self
+                .state
+                .unicast
+                .tls_connect_identity
+                .lock()
+                .unwrap()
+                .clone();
+            if let Some(identity) = identity {
+                return manager.new_link_with_tls_identity(endpoint, identity).await;
+            }
+        }
+        manager.new_link(endpoint).await
     }
 
     async fn open_transport_unicast_inner(
@@ -933,7 +959,7 @@ impl TransportManager {
 
         // Open the link
         tokio::time::timeout(self.config.unicast.open_timeout, async {
-            match manager.new_link(endpoint.clone()).await {
+            match self.new_link_unicast(&manager, endpoint.clone()).await {
                 Ok(link) => {
                     super::establishment::open::open_link(endpoint, link, self, expected_zid).await
                 }
