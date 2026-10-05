@@ -933,44 +933,42 @@ impl Runtime {
         certificate_pem: String,
         private_key_pem: String,
     ) -> ZResult<()> {
-        if self.whatami() != WhatAmI::Client {
-            bail!("TLS client-identity replacement is only supported by client runtimes")
-        }
         let _replacement = self.state.link_replacement.lock().await;
-        let transports = self.manager().get_transports_unicast().await;
-        if transports.len() != 1 {
+        // The identity belongs to the link this runtime dialed over TLS or QUIC
+        // (the relay). A peer runtime can also hold transports it accepted, such
+        // as local gateways, which carry no configured endpoint and are left alone.
+        let mut dialed = Vec::new();
+        for transport in self.manager().get_transports_unicast().await {
+            let Some(callback) = transport.get_callback()? else {
+                continue;
+            };
+            let session = callback
+                .as_any()
+                .downcast_ref::<RuntimeSession>()
+                .ok_or_else(|| {
+                    zenoh_result::zerror!("Existing transport has an unexpected callback")
+                })?;
+            let endpoints = zread!(session.endpoints)
+                .iter()
+                .filter(|endpoint| matches!(endpoint.protocol().as_str(), "quic" | "tls"))
+                .cloned()
+                .collect::<Vec<_>>();
+            for endpoint in endpoints {
+                dialed.push((transport.get_zid()?, endpoint));
+            }
+        }
+        if dialed.len() != 1 {
             bail!(
-                "TLS client-identity replacement requires exactly one live transport; found {}",
-                transports.len()
+                "TLS client-identity replacement requires exactly one live transport dialed over TLS or QUIC; found {}",
+                dialed.len()
             )
         }
-        let transport = &transports[0];
-        let expected_zid = transport.get_zid()?;
-        let callback = transport
-            .get_callback()?
-            .ok_or_else(|| zenoh_result::zerror!("Existing transport has no runtime callback"))?;
-        let session = callback
-            .as_any()
-            .downcast_ref::<RuntimeSession>()
-            .ok_or_else(|| zenoh_result::zerror!("Existing transport has an unexpected callback"))?;
-        let endpoints = zread!(session.endpoints)
-            .iter()
-            .filter(|endpoint| matches!(endpoint.protocol().as_str(), "quic" | "tls"))
-            .cloned()
-            .collect::<Vec<_>>();
-        if endpoints.len() != 1 {
-            bail!(
-                "TLS client-identity replacement requires exactly one configured TLS or QUIC endpoint; found {}",
-                endpoints.len()
-            )
-        }
-        let identity = zenoh_link_commons::tls::TlsClientIdentity::from_pem(
-            certificate_pem,
-            private_key_pem,
-        )
-        .map_err(|error| zenoh_result::zerror!("{error}"))?;
+        let (expected_zid, endpoint) = dialed.remove(0);
+        let identity =
+            zenoh_link_commons::tls::TlsClientIdentity::from_pem(certificate_pem, private_key_pem)
+                .map_err(|error| zenoh_result::zerror!("{error}"))?;
         self.manager()
-            .replace_transport_unicast_tls_link(endpoints[0].clone(), &expected_zid, identity)
+            .replace_transport_unicast_tls_link(endpoint, &expected_zid, identity)
             .await?;
         Ok(())
     }
