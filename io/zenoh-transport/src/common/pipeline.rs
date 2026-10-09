@@ -629,14 +629,16 @@ impl StageOutIn {
 }
 
 struct StageOutRefill {
-    n_ref_w: Notifier,
+    n_ref_w: Option<Notifier>,
     s_ref_w: RingBufferWriter<BoxedWBatch, RBLEN>,
 }
 
 impl StageOutRefill {
     fn refill(&mut self, batch: BoxedWBatch) {
         assert!(self.s_ref_w.push(batch).is_none());
-        let _ = self.n_ref_w.notify();
+        if let Some(notifier) = &self.n_ref_w {
+            let _ = notifier.notify();
+        }
     }
 }
 
@@ -786,7 +788,10 @@ impl TransmissionPipeline {
                     current,
                     backoff: Backoff::new(config.batching_time_limit, bytes),
                 },
-                s_ref: StageOutRefill { n_ref_w, s_ref_w },
+                s_ref: StageOutRefill {
+                    n_ref_w: Some(n_ref_w),
+                    s_ref_w,
+                },
                 n_out_r,
             });
         }
@@ -872,6 +877,9 @@ impl TransmissionPipelineProducer {
         &self,
         msg: NetworkMessageRef,
     ) -> Result<bool, TransportClosed> {
+        if self.status.is_disabled() {
+            return Err(TransportClosed);
+        }
         // If the queue is not QoS, it means that we only have one priority with index 0.
         let (idx, priority) = if self.stage_in.len() > 1 {
             let priority = msg.priority();
@@ -896,6 +904,9 @@ impl TransmissionPipelineProducer {
         let mut deadline = Deadline::new(wait_time, max_wait_time);
         // Lock the channel. We are the only one that will be writing on it.
         let mut queue = zlock!(self.stage_in[idx]);
+        if self.status.is_disabled() {
+            return Err(TransportClosed);
+        }
         // Check again for congestion in case it happens when blocking on the mutex.
         if msg.is_droppable() && self.status.is_congested(priority) {
             return Ok(false);
@@ -927,6 +938,9 @@ impl TransmissionPipelineProducer {
 
     #[inline]
     pub(crate) fn push_transport_message(&self, msg: TransportMessage, priority: Priority) -> bool {
+        if self.status.is_disabled() {
+            return false;
+        }
         // If the queue is not QoS, it means that we only have one priority with index 0.
         let priority = if self.stage_in.len() > 1 {
             priority as usize
@@ -935,6 +949,9 @@ impl TransmissionPipelineProducer {
         };
         // Lock the channel. We are the only one that will be writing on it.
         let mut queue = zlock!(self.stage_in[priority]);
+        if self.status.is_disabled() {
+            return false;
+        }
         queue.push_transport_message(msg)
     }
 
@@ -1038,6 +1055,13 @@ impl PipelineConsumer for TransmissionPipelineConsumer {
     }
 
     fn drain(&mut self) -> Vec<(BoxedWBatch, Priority)> {
+        self.status.set_disabled(true);
+        // A producer can hold Current while waiting for a recycled batch.
+        // Once TX stops, no batch can be recycled. Close the refill events
+        // before locking Current so those producers wake and release it.
+        for stage in self.stage_out.iter_mut() {
+            stage.s_ref.n_ref_w.take();
+        }
         // Drain the remaining batches
         let mut batches = vec![];
 
@@ -1116,6 +1140,8 @@ impl PipelineConsumer for SplitTransmissionPipelineConsumer {
     }
 
     fn drain(&mut self) -> Vec<(BoxedWBatch, Priority)> {
+        self.status.set_disabled(true);
+        self.stage_out.s_ref.n_ref_w.take();
         let current = self.stage_out.s_in.current.clone();
         let batches = self.stage_out.drain(&mut current.lock().unwrap());
         batches.into_iter().map(|b| (b, self.priority)).collect()
@@ -1148,6 +1174,65 @@ mod tests {
 
     const SLEEP: Duration = Duration::from_millis(100);
     const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn drain_unblocks_transport_writer(split: bool) {
+        let priorities = [TransportPriorityTx::make(Bits::from(TransportSn::MAX)).unwrap()];
+        let mut config = CONFIG_STREAMED;
+        config.batching_enabled = false;
+        let (producer, consumer) = TransmissionPipeline::make(config, &priorities, split);
+        let current = consumer.stage_out[0].s_in.current.clone();
+        assert!(producer.push_transport_message(
+            zenoh_protocol::transport::KeepAlive.into(),
+            Priority::Control,
+        ));
+
+        let (writer_tx, writer_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let sent = producer.push_transport_message(
+                zenoh_protocol::transport::KeepAlive.into(),
+                Priority::Control,
+            );
+            writer_tx.send(sent).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while current.try_lock().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "writer never waited for a free batch"
+            );
+            std::thread::yield_now();
+        }
+
+        let (drain_tx, drain_rx) = std::sync::mpsc::channel();
+        let drainer = std::thread::spawn(move || {
+            let count = if split {
+                consumer.split().pop().unwrap().drain().len()
+            } else {
+                let mut consumer = consumer;
+                consumer.drain().len()
+            };
+            drain_tx.send(count).unwrap();
+        });
+        assert_eq!(
+            drain_rx.recv_timeout(Duration::from_secs(2)).expect("drain deadlocked"),
+            1
+        );
+        assert!(!writer_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer stayed blocked"));
+        writer.join().unwrap();
+        drainer.join().unwrap();
+    }
+
+    #[test]
+    fn tx_pipeline_drain_unblocks_transport_writer() {
+        drain_unblocks_transport_writer(false);
+    }
+
+    #[test]
+    fn tx_pipeline_split_drain_unblocks_transport_writer() {
+        drain_unblocks_transport_writer(true);
+    }
 
     const CONFIG_STREAMED: TransmissionPipelineConf = TransmissionPipelineConf {
         batch: BatchConfig {
@@ -1334,7 +1419,10 @@ mod tests {
                 println!(
                     "Pipeline Blocking [>>>]: ({id}) Scheduling message #{i} with payload size of {payload_size} bytes"
                 );
-                queue.push_network_message(message.as_ref()).unwrap();
+                if let Err(TransportClosed) = queue.push_network_message(message.as_ref()) {
+                    assert!(queue.status.is_disabled());
+                    return;
+                }
                 let c = counter.fetch_add(1, Ordering::AcqRel);
                 println!(
                     "Pipeline Blocking [>>>]: ({}) Scheduled message #{} (tot {}) with payload size of {} bytes",
@@ -1382,7 +1470,8 @@ mod tests {
 
             timeout(TIMEOUT, check).await?;
 
-            // Drain the queue (but don't drop it to avoid dropping the messages)
+            // Draining closes the refill side and wakes blocked writers even
+            // while the consumer itself is retained.
             let _consumers = if link_supports_priority {
                 let status = consumer.status.clone();
                 let splits = timeout(
