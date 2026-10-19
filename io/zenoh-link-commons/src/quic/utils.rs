@@ -62,6 +62,7 @@ pub const PROTOCOL_MULTI_STREAM_MIXED_REL: &[u8] = b"zenoh-ms-mr";
 
 // QUIC MTU config
 pub const QUIC_INITIAL_MTU: &str = "initial_mtu";
+pub const QUIC_MAX_MTU: &str = "max_mtu";
 pub const QUIC_MTU_DISCOVERY_INTERVAL: &str = "mtu_discovery_interval_secs";
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -700,6 +701,7 @@ impl From<QuicAuthId> for LinkAuthId {
 
 pub(crate) struct QuicMtuConfig {
     initial_mtu: Option<u16>,
+    max_mtu: Option<u16>,
     mtu_discovery_interval_secs: Option<u64>,
 }
 
@@ -709,11 +711,14 @@ impl QuicMtuConfig {
             quic_transport_conf.initial_mtu(initial_mtu);
         }
 
-        if let Some(mtu_discovery_interval) =
-            self.mtu_discovery_interval_secs.map(Duration::from_secs)
-        {
+        if self.max_mtu.is_some() || self.mtu_discovery_interval_secs.is_some() {
             let mut mtu_discovery_config = quinn::MtuDiscoveryConfig::default();
-            mtu_discovery_config.interval(mtu_discovery_interval);
+            if let Some(max_mtu) = self.max_mtu {
+                mtu_discovery_config.upper_bound(max_mtu);
+            }
+            if let Some(interval) = self.mtu_discovery_interval_secs {
+                mtu_discovery_config.interval(Duration::from_secs(interval));
+            }
             quic_transport_conf.mtu_discovery_config(Some(mtu_discovery_config));
         }
     }
@@ -730,6 +735,30 @@ impl TryFrom<&Config<'_>> for QuicMtuConfig {
             })?);
         }
 
+        let max_mtu = config
+            .get(QUIC_MAX_MTU)
+            .map(|value| {
+                value.parse::<u16>().map_err(|err| {
+                    zerror!("could not parse QUIC endpoint's {QUIC_MAX_MTU} value `{value}`: {err}")
+                })
+            })
+            .transpose()?;
+        for (name, value) in [(QUIC_INITIAL_MTU, initial_mtu), (QUIC_MAX_MTU, max_mtu)] {
+            if let Some(value) = value {
+                if !(1200..=65527).contains(&value) {
+                    return Err(zerror!(
+                        "QUIC endpoint's {name} must be between 1200 and 65527 bytes"
+                    )
+                    .into());
+                }
+            }
+        }
+        if let Some(max_mtu) = max_mtu {
+            if initial_mtu.unwrap_or(1200) > max_mtu {
+                return Err(zerror!("QUIC endpoint's initial_mtu must not exceed max_mtu").into());
+            }
+        }
+
         let mut mtu_discovery_interval_secs = None;
         if let Some(interval_secs) = config.get(QUIC_MTU_DISCOVERY_INTERVAL) {
             mtu_discovery_interval_secs = Some(interval_secs
@@ -743,6 +772,7 @@ impl TryFrom<&Config<'_>> for QuicMtuConfig {
 
         Ok(Self {
             initial_mtu,
+            max_mtu,
             mtu_discovery_interval_secs,
         })
     }
@@ -779,4 +809,40 @@ pub(crate) fn get_negotiated_alpn(connection: &quinn::Connection) -> ZResult<Opt
         .downcast_ref::<HandshakeData>()
         .expect("HandshakeData should be only existing implementation");
     Ok(handshake_data.protocol.clone())
+}
+
+#[cfg(test)]
+mod mtu_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn mtu_limits_validate_before_configuring_quinn() {
+        for config in [
+            "max_mtu=1199",
+            "max_mtu=65528",
+            "max_mtu=invalid",
+            "initial_mtu=1199",
+            "initial_mtu=1400;max_mtu=1200",
+        ] {
+            let endpoint =
+                zenoh_protocol::core::EndPoint::from_str(&format!("quic/localhost:443#{config}"))
+                    .unwrap();
+            assert!(
+                QuicMtuConfig::try_from(&endpoint.config()).is_err(),
+                "{config}"
+            );
+        }
+        for config in [
+            "max_mtu=1200",
+            "initial_mtu=1200;max_mtu=1452;mtu_discovery_interval_secs=600",
+        ] {
+            let endpoint =
+                zenoh_protocol::core::EndPoint::from_str(&format!("quic/localhost:443#{config}"))
+                    .unwrap();
+            let mtu = QuicMtuConfig::try_from(&endpoint.config()).unwrap();
+            mtu.apply_to_transport(&mut TransportConfig::default());
+            assert!(mtu.max_mtu.is_some());
+        }
+    }
 }
