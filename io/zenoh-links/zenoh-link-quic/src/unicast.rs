@@ -162,6 +162,10 @@ impl LinkUnicastTrait for LinkUnicastQuic {
     }
 
     #[inline(always)]
+    fn get_quic_packet_observer(&self) -> Option<zenoh_link_commons::PacketObserverHandle> {
+        Some(self.connection.packet_observer())
+    }
+
     fn get_quic_stats(&self) -> Option<zenoh_link_commons::QuicStats> {
         Some(
             self.connection

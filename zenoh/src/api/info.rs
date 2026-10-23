@@ -14,6 +14,8 @@
 
 //! Tools to access information about the current zenoh [`Session`](crate::Session).
 
+pub use zenoh_link_commons::{PacketEvent, PacketObserver, PacketObserverHandle};
+
 use zenoh_config::{wrappers::ZenohId, WhatAmI};
 #[cfg(feature = "unstable")]
 use zenoh_core::{Resolve, ResolveClosure};
@@ -396,6 +398,7 @@ pub struct Link {
     pub(crate) mtu: u16,
     pub(crate) current_max_datagram_size: Option<u16>,
     pub(crate) quic_stats: Option<QuicStats>,
+    pub(crate) quic_packet_observer: Option<PacketObserverHandle>,
     pub(crate) is_streamed: bool,
     pub(crate) interfaces: Vec<String>,
     pub(crate) auth_identifier: Option<String>,
@@ -455,6 +458,7 @@ impl Link {
             mtu: link.mtu,
             current_max_datagram_size: link.current_max_datagram_size,
             quic_stats: link.quic_stats.map(Into::into),
+            quic_packet_observer: link.quic_packet_observer.clone(),
             is_streamed: link.is_streamed,
             interfaces: link.interfaces.clone(),
             auth_identifier,
@@ -474,6 +478,7 @@ impl Link {
             mtu: 0,
             current_max_datagram_size: None,
             quic_stats: None,
+            quic_packet_observer: None,
             is_streamed: false,
             interfaces: Vec::new(),
             auth_identifier: None,
@@ -529,6 +534,12 @@ impl Link {
     /// Gets a point-in-time snapshot of the underlying QUIC connection.
     /// Returns `None` for non-QUIC links.
     #[inline]
+    /// Connection-local, opt-in observation capability. This cannot change the
+    /// congestion controller or pacing policy.
+    pub fn quic_packet_observer(&self) -> Option<PacketObserverHandle> {
+        self.quic_packet_observer.clone()
+    }
+
     pub fn quic_stats(&self) -> Option<QuicStats> {
         self.quic_stats
     }

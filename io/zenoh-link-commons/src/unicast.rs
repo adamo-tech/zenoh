@@ -100,6 +100,8 @@ pub trait LinkUnicastTrait: Send + Sync {
     }
     /// Returns live QUIC statistics for this link. Non-QUIC links return
     /// `None`.
+    fn get_quic_packet_observer(&self) -> Option<crate::PacketObserverHandle> { None }
+
     fn get_quic_stats(&self) -> Option<crate::QuicStats> {
         None
     }
