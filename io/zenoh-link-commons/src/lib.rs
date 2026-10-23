@@ -21,6 +21,8 @@ extern crate alloc;
 
 mod dscp;
 mod listener;
+mod packet_observer;
+pub use packet_observer::{PacketEvent, PacketObserver, PacketObserverHandle};
 mod multicast;
 #[cfg(feature = "quic")]
 pub mod quic;
@@ -104,6 +106,8 @@ pub struct Link {
     pub mtu: BatchSize,
     pub current_max_datagram_size: Option<BatchSize>,
     pub quic_stats: Option<QuicStats>,
+    #[serde(skip)]
+    pub quic_packet_observer: Option<PacketObserverHandle>,
     pub is_streamed: bool,
     pub interfaces: Vec<String>,
     pub auth_identifier: LinkAuthId,
@@ -145,6 +149,7 @@ impl Link {
             mtu: link.get_mtu(),
             current_max_datagram_size: link.get_current_max_datagram_size(),
             quic_stats: link.get_quic_stats(),
+            quic_packet_observer: link.get_quic_packet_observer(),
             is_streamed: link.is_streamed(),
             interfaces: link.get_interface_names(),
             auth_identifier: link.get_auth_id().clone(),
@@ -162,6 +167,7 @@ impl Link {
             mtu: link.get_mtu(),
             current_max_datagram_size: None,
             quic_stats: None,
+            quic_packet_observer: None,
             is_streamed: false,
             interfaces: vec![],
             auth_identifier: link.get_auth_id().clone(),

@@ -65,6 +65,8 @@ impl fmt::Debug for QuicConnection {
 }
 
 impl QuicConnection {
+    pub fn packet_observer(&self) -> crate::PacketObserverHandle { self.delivery.packet_observer() }
+
     fn new(conn: quinn::Connection, delivery: Arc<DeliveryCounters>) -> Self {
         Self {
             conn,

@@ -37,12 +37,15 @@ use quinn_proto::{
 /// Cumulative acknowledged bytes for one connection.
 #[derive(Debug, Default)]
 pub struct DeliveryCounters {
+    observer: crate::PacketObserverHandle,
     delivered_bytes: AtomicU64,
     app_limited_delivered_bytes: AtomicU64,
     datagrams_shed: AtomicU64,
 }
 
 impl DeliveryCounters {
+    pub fn packet_observer(&self) -> crate::PacketObserverHandle { self.observer.clone() }
+
     /// Datagrams refused at admission because the send queue had fewer free
     /// bytes than the reserve kept for the top priorities.
     ///
@@ -102,6 +105,25 @@ struct DeliveryTracking {
 }
 
 impl Controller for DeliveryTracking {
+    #[cfg(feature = "quic_delivery_observer")]
+    fn wants_packet_events(&self) -> bool { self.counters.observer.enabled() }
+
+    #[cfg(feature = "quic_delivery_observer")]
+    fn on_packet_event(&mut self, event: quinn_proto::congestion::PacketEvent) {
+        use quinn_proto::congestion::PacketEvent as Q;
+        use crate::PacketEvent as P;
+        let event = match event {
+            Q::Reset { generation } => P::Reset { generation },
+            Q::Sent { now, generation, number, bytes, prior_in_flight } => P::Sent { now, generation, number, bytes, prior_in_flight },
+            Q::Acked { generation, number, bytes } => P::Acked { generation, number, bytes },
+            Q::Lost { generation, number, bytes } => P::Lost { generation, number, bytes },
+            Q::Neutered { generation, number } => P::Neutered { generation, number },
+            Q::Feedback { now, generation, prior_in_flight, app_limited } => P::Feedback { now, generation, prior_in_flight, app_limited },
+            Q::ApplicationLimited { generation } => P::ApplicationLimited { generation },
+        };
+        self.counters.observer.observe(event);
+    }
+
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {
         self.inner.on_sent(now, bytes, last_packet_number);
     }

@@ -27,6 +27,8 @@ version = { workspace = true }
 [features]
 # Requires the embedding SDK's patched quinn-proto bandwidth metrics.
 quic_bbr_bandwidth = []
+# Opt-in packet hooks supplied by the embedding SDK's vendored Quinn.
+quic_delivery_observer = ["quic"]
 compression = []
 quic = [
   "dep:base64",
