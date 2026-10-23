@@ -116,6 +116,10 @@ impl QuicConnection {
             is_mixed_rel,
             rtt_us: stats.path.rtt.as_micros() as u64,
             cwnd: stats.path.cwnd,
+            #[cfg(feature = "quic_bbr_bandwidth")]
+            bandwidth_bps: stats.path.bandwidth_bps,
+            #[cfg(not(feature = "quic_bbr_bandwidth"))]
+            bandwidth_bps: None,
             lost_packets: stats.path.lost_packets,
             lost_bytes: stats.path.lost_bytes,
             sent_packets: stats.path.sent_packets,

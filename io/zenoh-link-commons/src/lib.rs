@@ -66,6 +66,8 @@ pub struct QuicStats {
     pub is_mixed_rel: bool,
     pub rtt_us: u64,
     pub cwnd: u64,
+    /// Congestion controller delivery-rate model in bits/s, without pacing gains.
+    pub bandwidth_bps: Option<u64>,
     pub lost_packets: u64,
     pub lost_bytes: u64,
     pub sent_packets: u64,

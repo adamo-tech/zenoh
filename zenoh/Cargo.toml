@@ -29,6 +29,8 @@ version = { workspace = true }
 maintenance = { status = "actively-developed" }
 
 [features]
+# Opt-in readout provided by the embedding SDK's vendored Quinn.
+quic_bbr_bandwidth = ["zenoh-link-commons/quic_bbr_bandwidth"]
 auth_pubkey = ["zenoh-transport/auth_pubkey"]
 auth_usrpwd = ["zenoh-transport/auth_usrpwd"]
 default = [

@@ -324,6 +324,8 @@ pub struct QuicStats {
     pub is_mixed_rel: bool,
     pub rtt_us: u64,
     pub cwnd: u64,
+    /// Congestion controller delivery-rate model in bits/s, without pacing gains.
+    pub bandwidth_bps: Option<u64>,
     pub lost_packets: u64,
     pub lost_bytes: u64,
     pub sent_packets: u64,
@@ -359,6 +361,7 @@ impl From<zenoh_link_commons::QuicStats> for QuicStats {
             is_mixed_rel: stats.is_mixed_rel,
             rtt_us: stats.rtt_us,
             cwnd: stats.cwnd,
+            bandwidth_bps: stats.bandwidth_bps,
             lost_packets: stats.lost_packets,
             lost_bytes: stats.lost_bytes,
             sent_packets: stats.sent_packets,
