@@ -1162,7 +1162,9 @@ impl TransportEventHandler for RuntimeTransportEventHandler {
                                     return false;
                                 };
 
-                                if &peer == new_peer {
+                                // Match by identity: the snapshot's link list can
+                                // lag the live transport's while links come up.
+                                if peer.zid == new_peer.zid {
                                     return false;
                                 }
 
