@@ -29,6 +29,8 @@ version = { workspace = true }
 quic_bbr_bandwidth = []
 # Opt-in packet hooks supplied by the embedding SDK's vendored Quinn.
 quic_delivery_observer = ["quic"]
+# Opt-in fields supplied by the SDK's vendored quinn-proto, not upstream Quinn.
+quic_send_queue_stats = ["quic"]
 compression = []
 quic = [
   "dep:base64",

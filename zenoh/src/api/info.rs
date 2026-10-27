@@ -339,6 +339,12 @@ pub struct QuicStats {
     /// Datagram payload waiting for the congestion window, and its cap.
     pub datagram_send_queue_bytes: u64,
     pub datagram_send_queue_capacity: u64,
+    /// New reliable payload waiting for first transmission. None when unavailable.
+    pub stream_send_queue_bytes: Option<u64>,
+    /// Reliable payload waiting for retransmission; disjoint from new payload.
+    pub stream_retransmit_queue_bytes: Option<u64>,
+    /// All unacknowledged reliable payload, including unsent and in-flight data.
+    pub stream_unacked_bytes: Option<u64>,
     /// Lower-priority datagrams refused at the queue door so the reserve
     /// stays free for control.
     pub datagrams_shed: u64,
@@ -371,6 +377,9 @@ impl From<zenoh_link_commons::QuicStats> for QuicStats {
             app_limited_delivered_bytes: stats.app_limited_delivered_bytes,
             datagram_send_queue_bytes: stats.datagram_send_queue_bytes,
             datagram_send_queue_capacity: stats.datagram_send_queue_capacity,
+            stream_send_queue_bytes: stats.stream_send_queue_bytes,
+            stream_retransmit_queue_bytes: stats.stream_retransmit_queue_bytes,
+            stream_unacked_bytes: stats.stream_unacked_bytes,
             datagrams_shed: stats.datagrams_shed,
             congestion_events: stats.congestion_events,
             black_holes_detected: stats.black_holes_detected,

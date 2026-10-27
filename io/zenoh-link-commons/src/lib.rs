@@ -83,6 +83,13 @@ pub struct QuicStats {
     /// to open, and the most that may wait before the oldest is dropped.
     pub datagram_send_queue_bytes: u64,
     pub datagram_send_queue_capacity: u64,
+    /// New reliable payload waiting for first transmission. None when unavailable.
+    pub stream_send_queue_bytes: Option<u64>,
+    /// Reliable payload waiting for retransmission; disjoint from new payload.
+    pub stream_retransmit_queue_bytes: Option<u64>,
+    /// Unacknowledged reliable payload, including unsent and in-flight bytes.
+    /// Not a queue metric: healthy in-flight data must not trigger backoff.
+    pub stream_unacked_bytes: Option<u64>,
     /// Lower-priority datagrams refused at the queue door to keep the
     /// reserve free for control. Never entered the queue, cost nothing.
     pub datagrams_shed: u64,

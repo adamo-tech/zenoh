@@ -131,6 +131,18 @@ impl QuicConnection {
                 .saturating_sub(self.conn.datagram_send_buffer_space()))
                 as u64,
             datagram_send_queue_capacity: DATAGRAM_SEND_BUFFER_BYTES as u64,
+            #[cfg(feature = "quic_send_queue_stats")]
+            stream_send_queue_bytes: Some(stats.stream_send_queue_bytes),
+            #[cfg(not(feature = "quic_send_queue_stats"))]
+            stream_send_queue_bytes: None,
+            #[cfg(feature = "quic_send_queue_stats")]
+            stream_retransmit_queue_bytes: Some(stats.stream_retransmit_queue_bytes),
+            #[cfg(not(feature = "quic_send_queue_stats"))]
+            stream_retransmit_queue_bytes: None,
+            #[cfg(feature = "quic_send_queue_stats")]
+            stream_unacked_bytes: Some(stats.stream_unacked_bytes),
+            #[cfg(not(feature = "quic_send_queue_stats"))]
+            stream_unacked_bytes: None,
             datagrams_shed: self.delivery.datagrams_shed(),
             congestion_events: stats.path.congestion_events,
             black_holes_detected: stats.path.black_holes_detected,

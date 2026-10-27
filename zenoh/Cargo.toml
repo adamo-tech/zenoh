@@ -33,6 +33,7 @@ maintenance = { status = "actively-developed" }
 quic_bbr_bandwidth = ["zenoh-link-commons/quic_bbr_bandwidth"]
 # Opt-in packet hooks supplied by the embedding SDK's vendored Quinn.
 quic_delivery_observer = ["zenoh-link-commons/quic_delivery_observer"]
+quic_send_queue_stats = ["zenoh-link-commons/quic_send_queue_stats"]
 auth_pubkey = ["zenoh-transport/auth_pubkey"]
 auth_usrpwd = ["zenoh-transport/auth_usrpwd"]
 default = [
