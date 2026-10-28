@@ -75,14 +75,6 @@ impl QuicConnection {
         }
     }
 
-    /// Wrap a connection established outside the QUIC link, such as an
-    /// authenticated WebTransport session, whose transport configuration was
-    /// prepared by [`track_delivery`]. Stats and datagram admission then
-    /// behave exactly as on a connection this link accepted itself.
-    pub fn tracked(conn: quinn::Connection, delivery: Arc<DeliveryCounters>) -> Self {
-        Self::new(conn, delivery)
-    }
-
     /// returns `true` if this call closed the connection, `false` if the connection was already closed.
     pub fn close(&self) -> bool {
         let closed = self.closed.swap(true, std::sync::atomic::Ordering::Relaxed);
@@ -1001,21 +993,6 @@ mod admission_tests {
             || usize::MAX
         ));
     }
-}
-
-/// Give one connection's `config` this link's delivery-tracked controller
-/// and datagram send buffer, returning the counters that connection feeds.
-///
-/// Build a fresh configuration per connection: the counters are the
-/// connection's own, so sharing them would mix two paths' evidence.
-pub fn track_delivery(config: &mut quinn::TransportConfig) -> Arc<DeliveryCounters> {
-    let delivery = Arc::new(DeliveryCounters::default());
-    config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
-        default_congestion_factory(),
-        delivery.clone(),
-    )));
-    config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
-    delivery
 }
 
 /// The controller the delivery wrapper delegates to.

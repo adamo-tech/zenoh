@@ -35,7 +35,6 @@ uring = []
 
 [dependencies]
 async-trait = { workspace = true }
-bytes = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true, features = [
@@ -43,7 +42,6 @@ tokio = { workspace = true, features = [
   "macros",
   "net",
   "rt-multi-thread",
-  "sync",
   "time",
 ] }
 tokio-util = { workspace = true, features = ["rt"] }
