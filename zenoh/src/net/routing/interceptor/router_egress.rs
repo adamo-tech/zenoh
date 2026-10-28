@@ -89,18 +89,11 @@ impl InterceptorTrait for RouterEgressGate {
         None
     }
 
-    /// Drops publications and query replies while paused. Declarations,
-    /// interests and the peer's own queries still flow, so routing state stays
-    /// whole and data resumes the moment the gate opens. Final responses still
-    /// flow too, so a router's querier sees an empty answer instead of waiting
-    /// for its timeout.
+    /// Drops publications while paused. Declarations, interests, queries and
+    /// query replies still flow, so routing state stays whole, a router's
+    /// querier still gets its answer, and data resumes the moment the gate
+    /// opens.
     fn intercept(&self, msg: &mut NetworkMessageMut, _ctx: &mut dyn InterceptorContext) -> bool {
-        if !self.paused.load(Ordering::Relaxed) {
-            return true;
-        }
-        !matches!(
-            msg.body,
-            NetworkBodyMut::Push(_) | NetworkBodyMut::Response(_)
-        )
+        !(self.paused.load(Ordering::Relaxed) && matches!(msg.body, NetworkBodyMut::Push(_)))
     }
 }
