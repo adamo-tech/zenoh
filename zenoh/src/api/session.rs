@@ -1021,6 +1021,22 @@ impl Session {
         self.0.runtime.get_config()
     }
 
+    /// Hold back the publications and query replies this peer would send to
+    /// its routers, while its other faces keep receiving them.
+    ///
+    /// Declarations and this session's own queries still reach the routers,
+    /// so data resumes as soon as the pause is lifted. Only a peer-mode
+    /// session can pause; elsewhere this has no effect.
+    pub fn set_router_egress_paused(&self, paused: bool) {
+        if let Some(runtime) = self.0.runtime.static_runtime() {
+            runtime
+                .router()
+                .tables
+                .router_egress_paused
+                .store(paused, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Get a new Timestamp from a Zenoh [`Session`].
     ///
     /// The returned timestamp has the current time, with the Session's runtime [`ZenohId`].

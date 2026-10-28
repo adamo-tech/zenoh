@@ -13,7 +13,10 @@
 //
 use std::{
     str::FromStr,
-    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
 };
 
 use arc_swap::ArcSwapOption;
@@ -175,6 +178,7 @@ impl<'conf> GatewayBuilder<'conf> {
             })
             .collect::<RegionMap<_>>();
 
+        let router_egress_paused = Arc::new(AtomicBool::new(false));
         let data = TablesData::new(
             zid,
             self.hlc,
@@ -184,6 +188,7 @@ impl<'conf> GatewayBuilder<'conf> {
                 .copied()
                 .map(|b| (b, tables::HatTablesData::new()))
                 .collect(),
+            &router_egress_paused,
             #[cfg(feature = "stats")]
             stats,
         )?;
@@ -193,6 +198,7 @@ impl<'conf> GatewayBuilder<'conf> {
                 tables: RwLock::new(Tables { data, hats }),
                 ctrl_lock: Mutex::new(()),
                 queries_lock: RwLock::new(()),
+                router_egress_paused,
             }),
         })
     }

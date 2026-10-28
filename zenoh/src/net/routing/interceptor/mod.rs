@@ -27,7 +27,7 @@ mod authorization;
 use std::{
     any::Any,
     sync::{
-        atomic::{AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicPtr, Ordering},
         Arc,
     },
 };
@@ -52,6 +52,9 @@ use crate::{
 
 pub mod qos_overwrite;
 use crate::net::routing::interceptor::qos_overwrite::qos_overwrite_interceptor_factories;
+
+mod router_egress;
+use router_egress::router_egress_interceptor_factories;
 
 #[derive(Default, Debug)]
 pub struct InterfaceEnabled {
@@ -128,7 +131,10 @@ pub(crate) trait InterceptorFactoryTrait {
 
 pub(crate) type InterceptorFactory = Box<dyn InterceptorFactoryTrait + Send + Sync>;
 
-pub(crate) fn interceptor_factories(config: &Config) -> ZResult<Vec<InterceptorFactory>> {
+pub(crate) fn interceptor_factories(
+    config: &Config,
+    router_egress_paused: &Arc<AtomicBool>,
+) -> ZResult<Vec<InterceptorFactory>> {
     let mut res: Vec<InterceptorFactory> = vec![];
     // Uncomment to log the interceptors initialisation
     // res.push(Box::new(LoggerInterceptor {}));
@@ -143,6 +149,10 @@ pub(crate) fn interceptor_factories(config: &Config) -> ZResult<Vec<InterceptorF
     res.extend(acl_interceptor_factories(config.access_control())?);
     res.extend(qos_overwrite_interceptor_factories(config.qos().network())?);
     res.extend(low_pass_interceptor_factories(config.low_pass_filter())?);
+    res.extend(router_egress_interceptor_factories(
+        (*config.mode()).unwrap_or_default(),
+        router_egress_paused,
+    ));
     Ok(res)
 }
 
