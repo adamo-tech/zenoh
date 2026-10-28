@@ -17,7 +17,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
     },
     time::Duration,
@@ -176,6 +176,7 @@ impl TablesData {
         hlc: Option<Arc<HLC>>,
         config: &Config,
         hat: RegionMap<HatTablesData>,
+        router_egress_paused: &Arc<AtomicBool>,
         #[cfg(feature = "stats")] stats: zenoh_stats::StatsRegistry,
     ) -> ZResult<Self> {
         let drop_future_timestamp =
@@ -200,7 +201,7 @@ impl TablesData {
             queries_default_timeout,
             interests_timeout,
             root_res: Resource::root(),
-            interceptors: interceptor_factories(config)?,
+            interceptors: interceptor_factories(config, router_egress_paused)?,
             next_interceptor_version: AtomicUsize::new(0),
             hats: hat,
             face_counter: 0,
@@ -266,6 +267,8 @@ pub struct TablesLock {
     pub tables: RwLock<Tables>,
     pub(crate) ctrl_lock: Mutex<()>,
     pub(crate) queries_lock: RwLock<()>,
+    /// While set, a peer drops the data it would send to its routers.
+    pub(crate) router_egress_paused: Arc<AtomicBool>,
 }
 
 /// Gateway state.
@@ -533,7 +536,7 @@ impl TablesLock {
                 config.stats.filters().iter().map(|k| &*k.key),
             );
         }
-        tables.data.interceptors = interceptor_factories(config)?;
+        tables.data.interceptors = interceptor_factories(config, &self.router_egress_paused)?;
         drop(tables);
         let tables = zread!(self.tables);
         let version = tables
