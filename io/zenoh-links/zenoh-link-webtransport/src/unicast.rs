@@ -31,7 +31,9 @@ use web_transport_quinn::{RecvStream, Request, SendStream, Session, ALPN};
 use zenoh_core::{zasynclock, zasyncread, zasyncwrite};
 use zenoh_link_commons::{
     get_ip_interface_names,
-    quic::{get_quic_addr, get_quic_host, TlsClientConfig, TlsServerConfig},
+    quic::{
+        get_quic_addr, get_quic_host, unicast::QuicConnection, TlsClientConfig, TlsServerConfig,
+    },
     LinkAuthId, LinkManagerUnicastTrait, LinkUnicast, LinkUnicastTrait, NewLinkChannelSender,
 };
 use zenoh_protocol::{
@@ -42,7 +44,7 @@ use zenoh_protocol::{
 use zenoh_result::bail;
 use zenoh_result::{zerror, ZResult};
 
-use super::{WEBTRANSPORT_DEFAULT_MTU, WEBTRANSPORT_LOCATOR_PREFIX};
+use super::{handoff, WEBTRANSPORT_DEFAULT_MTU, WEBTRANSPORT_LOCATOR_PREFIX};
 
 pub struct LinkUnicastWebTransport {
     session: Session,
@@ -53,6 +55,9 @@ pub struct LinkUnicastWebTransport {
     dst_addr: SocketAddr,
     dst_locator: Locator,
     auth_id: LinkAuthId,
+    /// Present for handed-off sessions, whose delivery is tracked.
+    connection: Option<QuicConnection>,
+    is_mixed_rel: bool,
 }
 
 impl LinkUnicastWebTransport {
@@ -74,7 +79,24 @@ impl LinkUnicastWebTransport {
             dst_locator: Locator::new(WEBTRANSPORT_LOCATOR_PREFIX, dst_addr.to_string(), "")
                 .unwrap(),
             auth_id: LinkAuthId::WebTransport,
+            connection: None,
+            is_mixed_rel: false,
         }
+    }
+
+    pub(crate) fn tracked(
+        session: Session,
+        send: SendStream,
+        recv: RecvStream,
+        src_addr: SocketAddr,
+        dst_addr: SocketAddr,
+        connection: QuicConnection,
+        is_mixed_rel: bool,
+    ) -> Self {
+        let mut link = Self::new(session, send, recv, src_addr, dst_addr);
+        link.connection = Some(connection);
+        link.is_mixed_rel = is_mixed_rel;
+        link
     }
 }
 
@@ -150,6 +172,18 @@ impl LinkUnicastTrait for LinkUnicastWebTransport {
         get_ip_interface_names(&self.src_addr)
     }
 
+    fn get_quic_packet_observer(&self) -> Option<zenoh_link_commons::PacketObserverHandle> {
+        self.connection
+            .as_ref()
+            .map(QuicConnection::packet_observer)
+    }
+
+    fn get_quic_stats(&self) -> Option<zenoh_link_commons::QuicStats> {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.stats(true, false, self.is_mixed_rel))
+    }
+
     #[inline(always)]
     fn is_reliable(&self) -> bool {
         super::IS_RELIABLE
@@ -209,6 +243,7 @@ struct ListenerUnicastWebTransport {
 pub struct LinkManagerUnicastWebTransport {
     manager: NewLinkChannelSender,
     listeners: Arc<AsyncRwLock<HashMap<SocketAddr, ListenerUnicastWebTransport>>>,
+    handoff_listeners: Arc<AsyncRwLock<HashMap<String, ListenerUnicastWebTransport>>>,
 }
 
 impl fmt::Debug for LinkManagerUnicastWebTransport {
@@ -223,6 +258,7 @@ impl LinkManagerUnicastWebTransport {
         Self {
             manager,
             listeners: Arc::new(AsyncRwLock::new(HashMap::new())),
+            handoff_listeners: Arc::new(AsyncRwLock::new(HashMap::new())),
         }
     }
 }
@@ -241,6 +277,16 @@ fn connect_url(host: &str, port: u16) -> ZResult<url::Url> {
 #[async_trait]
 impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
     async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {
+        if let Some(name) = endpoint.metadata().get(handoff::HANDOFF) {
+            // The session was dialled and authenticated by the application.
+            let receiver = handoff::receiver(name);
+            let mut receiver = receiver.lock().await;
+            let handoff = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+                .await
+                .map_err(|_| zerror!("No WebTransport session was handed off to {endpoint}"))?
+                .ok_or_else(|| zerror!("WebTransport handoff {name} was released"))?;
+            return Ok(handoff::into_link(handoff));
+        }
         let epaddr = endpoint.address();
         let epconf = endpoint.config();
 
@@ -294,6 +340,9 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
     }
 
     async fn new_listener(&self, mut endpoint: EndPoint) -> ZResult<Locator> {
+        if let Some(name) = endpoint.metadata().get(handoff::HANDOFF).map(str::to_owned) {
+            return self.new_handoff_listener(endpoint, name).await;
+        }
         let epaddr = endpoint.address();
         let epconf = endpoint.config();
 
@@ -350,6 +399,13 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
     }
 
     async fn del_listener(&self, endpoint: &EndPoint) -> ZResult<()> {
+        if let Some(name) = endpoint.metadata().get(handoff::HANDOFF) {
+            let listener = zasyncwrite!(self.handoff_listeners)
+                .remove(name)
+                .ok_or_else(|| zerror!("WebTransport handoff listener {name} was not found"))?;
+            listener.token.cancel();
+            return listener.handle.await?;
+        }
         let epaddr = endpoint.address();
         let addr = get_quic_addr(&epaddr).await?;
 
@@ -362,17 +418,67 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastWebTransport {
     }
 
     async fn get_listeners(&self) -> Vec<EndPoint> {
-        zasyncread!(self.listeners)
+        let mut endpoints: Vec<_> = zasyncread!(self.listeners)
             .values()
             .map(|l| l.endpoint.clone())
-            .collect()
+            .collect();
+        endpoints.extend(
+            zasyncread!(self.handoff_listeners)
+                .values()
+                .map(|l| l.endpoint.clone()),
+        );
+        endpoints
     }
 
     async fn get_locators(&self) -> Vec<Locator> {
+        // A handoff queue is reachable only from inside this process, so it
+        // is not a locator worth advertising to peers.
         zasyncread!(self.listeners)
             .values()
             .map(|l| l.endpoint.to_locator())
             .collect()
+    }
+}
+
+impl LinkManagerUnicastWebTransport {
+    async fn new_handoff_listener(&self, endpoint: EndPoint, name: String) -> ZResult<Locator> {
+        let mut listeners = zasyncwrite!(self.handoff_listeners);
+        if listeners.contains_key(&name) {
+            return Err(zerror!("WebTransport handoff listener {name} already exists").into());
+        }
+        let token = CancellationToken::new();
+        let receiver = handoff::receiver(&name);
+        let task = {
+            let token = token.clone();
+            let manager = self.manager.clone();
+            async move {
+                let mut receiver = receiver.lock().await;
+                loop {
+                    tokio::select! {
+                        handoff = receiver.recv() => {
+                            let Some(handoff) = handoff else { break };
+                            tracing::debug!("Accepted handed-off WebTransport session: {handoff:?}");
+                            if let Err(e) = manager.send_async(handoff::into_link(handoff)).await {
+                                tracing::error!("{}-{}: {}", file!(), line!(), e)
+                            }
+                        }
+                        _ = token.cancelled() => break,
+                    }
+                }
+                Ok(())
+            }
+        };
+        let handle = zenoh_runtime::ZRuntime::Acceptor.spawn(task);
+        let locator = endpoint.to_locator();
+        listeners.insert(
+            name,
+            ListenerUnicastWebTransport {
+                endpoint,
+                token,
+                handle,
+            },
+        );
+        Ok(locator)
     }
 }
 

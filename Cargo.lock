@@ -5362,6 +5362,7 @@ name = "zenoh-link-webtransport"
 version = "1.9.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "quinn",
  "rustls",
  "tokio",

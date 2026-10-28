@@ -24,6 +24,7 @@ use zenoh_link_commons::LocatorInspector;
 use zenoh_protocol::{core::Locator, transport::BatchSize};
 use zenoh_result::ZResult;
 
+pub mod handoff;
 mod unicast;
 pub use unicast::*;
 
