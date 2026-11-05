@@ -113,6 +113,7 @@ impl Controller for DeliveryTracking {
         use quinn_proto::congestion::PacketEvent as Q;
         use crate::PacketEvent as P;
         let event = match event {
+            Q::StreamBuffer { unacked_bytes } => P::StreamBuffer { unacked_bytes },
             Q::Reset { generation } => P::Reset { generation },
             Q::Sent { now, generation, number, bytes, prior_in_flight } => P::Sent { now, generation, number, bytes, prior_in_flight },
             Q::Acked { generation, number, bytes } => P::Acked { generation, number, bytes },
