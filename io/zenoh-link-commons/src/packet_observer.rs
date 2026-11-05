@@ -14,6 +14,8 @@ use std::{
 
 #[derive(Clone, Copy, Debug)]
 pub enum PacketEvent {
+    /// Reliable stream bytes accepted locally and not yet acknowledged, including unsent bytes.
+    StreamBuffer { unacked_bytes: u64 },
     Reset {
         generation: u64,
     },
