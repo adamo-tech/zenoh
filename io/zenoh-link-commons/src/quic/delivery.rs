@@ -123,6 +123,12 @@ impl Controller for DeliveryTracking {
             counters: self.counters.clone(),
         })
     }
+    fn uses_native_pacing(&self) -> bool {
+        self.inner.uses_native_pacing()
+    }
+    fn send_schedule(&mut self, now: Instant, in_flight: u64) -> quinn_proto::congestion::SendSchedule {
+        self.inner.send_schedule(now, in_flight)
+    }
     fn pacing_rate(&self) -> Option<u64> {
         self.inner.pacing_rate()
     }
@@ -133,13 +139,14 @@ impl Controller for DeliveryTracking {
         self.inner.control_error()
     }
     fn on_control_event(&mut self, event: quinn_proto::congestion::ControlEvent) {
-        if matches!(
+        let event = if matches!(
             event,
             quinn_proto::congestion::ControlEvent::ApplicationLimited { .. }
-        ) && self.counters.observer.production_held()
-        {
-            return;
-        }
+        ) && self.counters.observer.production_held() {
+            quinn_proto::congestion::ControlEvent::ProductionHeld
+        } else {
+            event
+        };
         self.inner.on_control_event(event);
         #[cfg(feature = "quic_delivery_observer")]
         if let Some(model) = self.inner.shared_model() {
@@ -296,11 +303,17 @@ mod controller_tests {
         fn set_initial_rtt(&mut self, rtt: std::time::Duration) {
             self.0.store(rtt.as_micros() as u64, Ordering::Relaxed);
         }
+        fn uses_native_pacing(&self) -> bool {
+            true
+        }
+        fn send_schedule(&mut self, now: Instant, _: u64) -> quinn_proto::congestion::SendSchedule {
+            quinn_proto::congestion::SendSchedule::PacedUntil(now + std::time::Duration::from_micros(123))
+        }
         fn pacing_rate(&self) -> Option<u64> {
             Some(12345)
         }
-        fn on_control_event(&mut self, _: quinn_proto::congestion::ControlEvent) {
-            self.0.fetch_add(1, Ordering::Relaxed);
+        fn on_control_event(&mut self, event: quinn_proto::congestion::ControlEvent) {
+            self.0.fetch_add(if matches!(event, quinn_proto::congestion::ControlEvent::ProductionHeld) { 10 } else { 1 }, Ordering::Relaxed);
         }
         fn on_congestion_event(&mut self, _: Instant, _: Instant, _: bool, _: u64) {}
         fn on_mtu_update(&mut self, _: u16) {}
@@ -327,12 +340,18 @@ mod controller_tests {
         assert_eq!(wrapper.name(), "forwarding-probe");
         assert!(!wrapper.supports_ecn());
         assert_eq!(wrapper.pacing_rate(), Some(12345));
+        assert!(wrapper.uses_native_pacing());
+        let now = Instant::now();
+        assert_eq!(wrapper.send_schedule(now, 0), quinn_proto::congestion::SendSchedule::PacedUntil(now + std::time::Duration::from_micros(123)));
         wrapper.set_initial_rtt(std::time::Duration::from_micros(7000));
         assert_eq!(seen.load(Ordering::Relaxed), 7000);
         wrapper.on_control_event(quinn_proto::congestion::ControlEvent::ApplicationLimited {
             in_flight: 0,
         });
         assert_eq!(seen.load(Ordering::Relaxed), 7001);
+        wrapper.counters.observer.hold_production(std::time::Duration::from_secs(1));
+        wrapper.on_control_event(quinn_proto::congestion::ControlEvent::ApplicationLimited { in_flight: 0 });
+        assert_eq!(seen.load(Ordering::Relaxed), 7011, "transport hold must stop pacing catch-up without marking BBR source-limited");
         let cloned = wrapper.clone_for_path(Instant::now());
         assert_eq!(cloned.name(), "forwarding-probe");
         assert_eq!(cloned.pacing_rate(), Some(12345));

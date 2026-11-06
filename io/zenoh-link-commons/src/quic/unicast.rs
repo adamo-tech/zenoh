@@ -1000,10 +1000,10 @@ fn default_congestion_factory() -> ZResult<Arc<dyn quinn::congestion::Controller
             config.honor_requested_pacing(true);
             Ok(Arc::new(config))
         }
-        Ok("bbr3") => quinn::congestion::Bbr3Config::load()
+        Ok("bbr3") | Ok("bbr3-passive-media") => quinn::congestion::Bbr3Config::load()
             .map(|c| Arc::new(c) as Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>)
             .map_err(|e| zerror!("Cannot select active BBRv3: {e}. Install the matching native library or unset ADAMO_QUIC_CONTROLLER.").into()),
-        _ => Err(zerror!("ADAMO_QUIC_CONTROLLER must be bbr1, bbr1-paced, or bbr3").into()),
+        _ => Err(zerror!("ADAMO_QUIC_CONTROLLER must be bbr1, bbr1-paced, bbr3, or bbr3-passive-media").into()),
     }
 }
 
