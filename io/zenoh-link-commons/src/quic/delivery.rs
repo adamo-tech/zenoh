@@ -44,7 +44,9 @@ pub struct DeliveryCounters {
 }
 
 impl DeliveryCounters {
-    pub fn packet_observer(&self) -> crate::PacketObserverHandle { self.observer.clone() }
+    pub fn packet_observer(&self) -> crate::PacketObserverHandle {
+        self.observer.clone()
+    }
 
     /// Datagrams refused at admission because the send queue had fewer free
     /// bytes than the reserve kept for the top priorities.
@@ -105,21 +107,103 @@ struct DeliveryTracking {
 }
 
 impl Controller for DeliveryTracking {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn supports_ecn(&self) -> bool {
+        self.inner.supports_ecn()
+    }
+    fn set_initial_rtt(&mut self, rtt: std::time::Duration) {
+        self.inner.set_initial_rtt(rtt);
+    }
+
+    fn clone_for_path(&self, now: Instant) -> Box<dyn Controller> {
+        Box::new(Self {
+            inner: self.inner.clone_for_path(now),
+            counters: self.counters.clone(),
+        })
+    }
+    fn pacing_rate(&self) -> Option<u64> {
+        self.inner.pacing_rate()
+    }
+    fn shared_model(&self) -> Option<quinn_proto::congestion::SharedModel> {
+        self.inner.shared_model()
+    }
+    fn control_error(&self) -> Option<&'static str> {
+        self.inner.control_error()
+    }
+    fn on_control_event(&mut self, event: quinn_proto::congestion::ControlEvent) {
+        if matches!(
+            event,
+            quinn_proto::congestion::ControlEvent::ApplicationLimited { .. }
+        ) && self.counters.observer.production_held()
+        {
+            return;
+        }
+        self.inner.on_control_event(event);
+        #[cfg(feature = "quic_delivery_observer")]
+        if let Some(model) = self.inner.shared_model() {
+            self.counters
+                .observer
+                .observe(crate::PacketEvent::SharedModel { model });
+        }
+    }
+
     #[cfg(feature = "quic_delivery_observer")]
-    fn wants_packet_events(&self) -> bool { self.counters.observer.enabled() }
+    fn wants_packet_events(&self) -> bool {
+        self.counters.observer.enabled()
+    }
 
     #[cfg(feature = "quic_delivery_observer")]
     fn on_packet_event(&mut self, event: quinn_proto::congestion::PacketEvent) {
-        use quinn_proto::congestion::PacketEvent as Q;
         use crate::PacketEvent as P;
+        use quinn_proto::congestion::PacketEvent as Q;
         let event = match event {
             Q::StreamBuffer { unacked_bytes } => P::StreamBuffer { unacked_bytes },
             Q::Reset { generation } => P::Reset { generation },
-            Q::Sent { now, generation, number, bytes, prior_in_flight } => P::Sent { now, generation, number, bytes, prior_in_flight },
-            Q::Acked { generation, number, bytes } => P::Acked { generation, number, bytes },
-            Q::Lost { generation, number, bytes } => P::Lost { generation, number, bytes },
+            Q::Sent {
+                now,
+                generation,
+                number,
+                bytes,
+                prior_in_flight,
+            } => P::Sent {
+                now,
+                generation,
+                number,
+                bytes,
+                prior_in_flight,
+            },
+            Q::Acked {
+                generation,
+                number,
+                bytes,
+            } => P::Acked {
+                generation,
+                number,
+                bytes,
+            },
+            Q::Lost {
+                generation,
+                number,
+                bytes,
+            } => P::Lost {
+                generation,
+                number,
+                bytes,
+            },
             Q::Neutered { generation, number } => P::Neutered { generation, number },
-            Q::Feedback { now, generation, prior_in_flight, app_limited } => P::Feedback { now, generation, prior_in_flight, app_limited },
+            Q::Feedback {
+                now,
+                generation,
+                prior_in_flight,
+                app_limited,
+            } => P::Feedback {
+                now,
+                generation,
+                prior_in_flight,
+                app_limited,
+            },
             Q::ApplicationLimited { generation } => P::ApplicationLimited { generation },
         };
         self.counters.observer.observe(event);
@@ -195,5 +279,62 @@ impl Controller for DeliveryTracking {
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
+    }
+}
+
+#[cfg(test)]
+mod controller_tests {
+    use super::*;
+    struct Probe(Arc<AtomicU64>);
+    impl Controller for Probe {
+        fn name(&self) -> &'static str {
+            "forwarding-probe"
+        }
+        fn supports_ecn(&self) -> bool {
+            false
+        }
+        fn set_initial_rtt(&mut self, rtt: std::time::Duration) {
+            self.0.store(rtt.as_micros() as u64, Ordering::Relaxed);
+        }
+        fn pacing_rate(&self) -> Option<u64> {
+            Some(12345)
+        }
+        fn on_control_event(&mut self, _: quinn_proto::congestion::ControlEvent) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn on_congestion_event(&mut self, _: Instant, _: Instant, _: bool, _: u64) {}
+        fn on_mtu_update(&mut self, _: u16) {}
+        fn window(&self) -> u64 {
+            12000
+        }
+        fn initial_window(&self) -> u64 {
+            12000
+        }
+        fn clone_box(&self) -> Box<dyn Controller> {
+            Box::new(Self(self.0.clone()))
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+    }
+    #[test]
+    fn controller_forwarding_preserves_control_contract() {
+        let seen = Arc::new(AtomicU64::new(0));
+        let mut wrapper = DeliveryTracking {
+            inner: Box::new(Probe(seen.clone())),
+            counters: Arc::new(DeliveryCounters::default()),
+        };
+        assert_eq!(wrapper.name(), "forwarding-probe");
+        assert!(!wrapper.supports_ecn());
+        assert_eq!(wrapper.pacing_rate(), Some(12345));
+        wrapper.set_initial_rtt(std::time::Duration::from_micros(7000));
+        assert_eq!(seen.load(Ordering::Relaxed), 7000);
+        wrapper.on_control_event(quinn_proto::congestion::ControlEvent::ApplicationLimited {
+            in_flight: 0,
+        });
+        assert_eq!(seen.load(Ordering::Relaxed), 7001);
+        let cloned = wrapper.clone_for_path(Instant::now());
+        assert_eq!(cloned.name(), "forwarding-probe");
+        assert_eq!(cloned.pacing_rate(), Some(12345));
     }
 }

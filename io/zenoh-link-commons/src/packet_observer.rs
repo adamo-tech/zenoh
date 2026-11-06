@@ -6,16 +6,22 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy, Debug)]
 pub enum PacketEvent {
+    #[cfg(feature = "quic")]
+    SharedModel {
+        model: quinn_proto::congestion::SharedModel,
+    },
     /// Reliable stream bytes accepted locally and not yet acknowledged, including unsent bytes.
-    StreamBuffer { unacked_bytes: u64 },
+    StreamBuffer {
+        unacked_bytes: u64,
+    },
     Reset {
         generation: u64,
     },
@@ -56,17 +62,46 @@ pub trait PacketObserver: Send + Sync {
     fn observe(&self, event: PacketEvent);
 }
 
-#[derive(Default)]
 struct Slot {
+    epoch: Instant,
+    production_held_until_us: AtomicU64,
     enabled: AtomicBool,
     observer: RwLock<Option<Arc<dyn PacketObserver>>>,
 }
 
+impl Default for Slot {
+    fn default() -> Self {
+        Self {
+            epoch: Instant::now(),
+            production_held_until_us: AtomicU64::new(0),
+            enabled: AtomicBool::new(false),
+            observer: RwLock::new(None),
+        }
+    }
+}
 /// A capability for one established QUIC connection. Clones refer to the same
 /// slot, including the reliable/datagram views of a mixed-reliability link.
 #[derive(Clone, Default)]
 pub struct PacketObserverHandle(Arc<Slot>);
 impl PacketObserverHandle {
+    /// A producer waiting on reliable admission is not an idle source.
+    pub fn hold_production(&self, duration: Duration) {
+        let deadline = self
+            .0
+            .epoch
+            .elapsed()
+            .saturating_add(duration)
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        self.0
+            .production_held_until_us
+            .fetch_max(deadline, Ordering::Relaxed);
+    }
+    pub(crate) fn production_held(&self) -> bool {
+        self.0.epoch.elapsed().as_micros()
+            < u128::from(self.0.production_held_until_us.load(Ordering::Relaxed))
+    }
+
     /// Installs once. Returns false when this connection already has an observer.
     pub fn install(&self, observer: Arc<dyn PacketObserver>) -> bool {
         let mut slot = self.0.observer.write().unwrap_or_else(|e| e.into_inner());
@@ -113,7 +148,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     struct Count(Arc<AtomicUsize>);
     impl PacketObserver for Count {
-        fn observe(&self, _: PacketEvent) { self.0.fetch_add(1, Ordering::Relaxed); }
+        fn observe(&self, _: PacketEvent) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
     }
     #[test]
     fn observers_are_connection_local_and_install_once() {
