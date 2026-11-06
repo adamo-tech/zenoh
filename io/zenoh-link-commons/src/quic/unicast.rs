@@ -667,7 +667,7 @@ impl QuicClient {
                 .configure_max_concurrent_streams(multistream.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
             transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
-                default_congestion_factory(),
+                default_congestion_factory()?,
                 delivery.clone(),
             )));
             transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
@@ -789,7 +789,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             let mut transport_config = quinn::TransportConfig::default();
             configure_transport(&mut transport_config);
             transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
-                default_congestion_factory(),
+                default_congestion_factory()?,
                 delivery.clone(),
             )));
             transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
@@ -1003,8 +1003,20 @@ mod admission_tests {
 /// every frame into a multi-round-trip wait. BBR paces to the measured
 /// delivery rate instead, which is what the media layer's own controller
 /// does above it.
-fn default_congestion_factory() -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
-    Arc::new(quinn::congestion::BbrConfig::default())
+fn default_congestion_factory() -> ZResult<Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>> {
+    match std::env::var("ADAMO_QUIC_CONTROLLER").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("bbr1") =>
+            Ok(Arc::new(quinn::congestion::BbrConfig::default())),
+        Ok("bbr1-paced") => {
+            let mut config = quinn::congestion::BbrConfig::default();
+            config.honor_requested_pacing(true);
+            Ok(Arc::new(config))
+        }
+        Ok("bbr3") => quinn::congestion::Bbr3Config::load()
+            .map(|c| Arc::new(c) as Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>)
+            .map_err(|e| zerror!("Cannot select active BBRv3: {e}. Install the matching native library or unset ADAMO_QUIC_CONTROLLER.").into()),
+        _ => Err(zerror!("ADAMO_QUIC_CONTROLLER must be bbr1, bbr1-paced, or bbr3").into()),
+    }
 }
 
 /// Material for building a link after accepting a new connection on a QUIC listener
