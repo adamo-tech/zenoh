@@ -135,6 +135,9 @@ impl Controller for DeliveryTracking {
     fn shared_model(&self) -> Option<quinn_proto::congestion::SharedModel> {
         self.inner.shared_model()
     }
+    fn production_held(&self) -> bool {
+        self.counters.observer.production_held()
+    }
     fn control_error(&self) -> Option<&'static str> {
         self.inner.control_error()
     }
