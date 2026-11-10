@@ -654,6 +654,7 @@ impl QuicClient {
             QuicTransportConfigurator(&mut transport_config)
                 .configure_max_concurrent_streams(multistream.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
+            configure_experimental_transport(&mut transport_config)?;
             transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
                 default_congestion_factory()?,
                 delivery.clone(),
@@ -776,6 +777,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             let delivery = Arc::new(DeliveryCounters::default());
             let mut transport_config = quinn::TransportConfig::default();
             configure_transport(&mut transport_config);
+            configure_experimental_transport(&mut transport_config)?;
             transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
                 default_congestion_factory()?,
                 delivery.clone(),
@@ -980,6 +982,42 @@ mod admission_tests {
             usize::MAX,
             || usize::MAX
         ));
+    }
+}
+
+fn experimental_gso_setting(value: Option<&str>) -> ZResult<Option<bool>> {
+    match value {
+        None => Ok(None),
+        Some("on") => Ok(Some(true)),
+        Some("off") => Ok(Some(false)),
+        _ => Err(zerror!("ADAMO_QUIC_GSO must be on or off; unset it to retain Quinn's default").into()),
+    }
+}
+
+fn configure_experimental_transport(transport: &mut quinn::TransportConfig) -> ZResult<()> {
+    let value = match std::env::var("ADAMO_QUIC_GSO") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err(zerror!("ADAMO_QUIC_GSO must contain UTF-8 on or off; unset it to retain Quinn's default").into()),
+    };
+    if let Some(enabled) = experimental_gso_setting(value.as_deref())? {
+        transport.enable_segmentation_offload(enabled);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod experimental_gso_tests {
+    use super::experimental_gso_setting;
+    #[test]
+    fn explicit_gso_selection_preserves_default_and_rejects_unknown_values() {
+        assert_eq!(experimental_gso_setting(None).unwrap(), None);
+        assert_eq!(experimental_gso_setting(Some("on")).unwrap(), Some(true));
+        assert_eq!(experimental_gso_setting(Some("off")).unwrap(), Some(false));
+        for value in ["", "false", "disabled", "automatic"] {
+            let error = experimental_gso_setting(Some(value)).unwrap_err().to_string();
+            assert!(error.contains("on or off") && error.contains("unset"));
+        }
     }
 }
 
