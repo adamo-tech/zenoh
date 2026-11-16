@@ -24,7 +24,7 @@ use std::{
     any::Any,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, RwLock,
     },
     time::Instant,
 };
@@ -33,6 +33,52 @@ use quinn_proto::{
     congestion::{Controller, ControllerFactory, ControllerMetrics},
     RttEstimator,
 };
+
+/// Session-local controller selection, shared by current and future connections.
+/// Loading is fallible and completes before publishing a new selection.
+#[derive(Clone)]
+pub struct CongestionPolicy(Arc<PolicyState>);
+struct PolicyState {
+    revision: AtomicU64,
+    selection: RwLock<(u64, Arc<dyn ControllerFactory + Send + Sync>)>,
+}
+impl Default for CongestionPolicy {
+    fn default() -> Self {
+        Self(Arc::new(PolicyState {
+            revision: AtomicU64::new(0),
+            selection: RwLock::new((0, Arc::new(quinn_proto::congestion::BbrConfig::default()))),
+        }))
+    }
+}
+impl std::fmt::Debug for CongestionPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CongestionPolicy").finish_non_exhaustive()
+    }
+}
+impl CongestionPolicy {
+    pub fn set_bbr3(&self, enabled: bool) -> Result<(), String> {
+        let factory: Arc<dyn ControllerFactory + Send + Sync> = if enabled {
+            Arc::new(quinn_proto::congestion::Bbr3Config::load()?)
+        } else {
+            Arc::new(quinn_proto::congestion::BbrConfig::default())
+        };
+        self.set_factory(factory);
+        Ok(())
+    }
+    fn set_factory(&self, factory: Arc<dyn ControllerFactory + Send + Sync>) {
+        let mut selection = self.0.selection.write().unwrap_or_else(|e| e.into_inner());
+        selection.0 += 1;
+        selection.1 = factory;
+        self.0.revision.store(selection.0, Ordering::Release);
+    }
+    fn selection(&self) -> (u64, Arc<dyn ControllerFactory + Send + Sync>) {
+        self.0
+            .selection
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
 
 /// Cumulative acknowledged bytes for one connection.
 #[derive(Debug, Default)]
@@ -81,29 +127,76 @@ impl DeliveryCounters {
 pub struct DeliveryTrackingFactory {
     inner: Arc<dyn ControllerFactory + Send + Sync>,
     counters: Arc<DeliveryCounters>,
+    policy: Option<CongestionPolicy>,
 }
 
 impl DeliveryTrackingFactory {
+    pub fn for_session(policy: CongestionPolicy, counters: Arc<DeliveryCounters>) -> Self {
+        Self {
+            inner: policy.selection().1,
+            counters,
+            policy: Some(policy),
+        }
+    }
+
     pub fn new(
         inner: Arc<dyn ControllerFactory + Send + Sync>,
         counters: Arc<DeliveryCounters>,
     ) -> Self {
-        Self { inner, counters }
+        Self {
+            inner,
+            counters,
+            policy: None,
+        }
     }
 }
 
 impl ControllerFactory for DeliveryTrackingFactory {
     fn build(self: Arc<Self>, now: Instant, current_mtu: u16) -> Box<dyn Controller> {
+        let (revision, factory) = self
+            .policy
+            .as_ref()
+            .map_or_else(|| (0, self.inner.clone()), CongestionPolicy::selection);
         Box::new(DeliveryTracking {
-            inner: self.inner.clone().build(now, current_mtu),
+            policy: self.policy.clone(),
+            revision,
+            mtu: current_mtu,
+            initial_rtt: std::time::Duration::from_millis(333),
+            inner: factory.build(now, current_mtu),
             counters: self.counters.clone(),
         })
     }
 }
 
 struct DeliveryTracking {
+    policy: Option<CongestionPolicy>,
+    revision: u64,
+    mtu: u16,
+    initial_rtt: std::time::Duration,
     inner: Box<dyn Controller>,
     counters: Arc<DeliveryCounters>,
+}
+
+impl DeliveryTracking {
+    fn selection_pending(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_some_and(|policy| policy.0.revision.load(Ordering::Acquire) != self.revision)
+    }
+    fn refresh_controller(&mut self, now: Instant) {
+        let Some(policy) = &self.policy else { return };
+        if policy.0.revision.load(Ordering::Acquire) == self.revision {
+            return;
+        }
+        let (revision, factory) = policy.selection();
+        if revision == self.revision {
+            return;
+        }
+        let mut inner = factory.build(now, self.mtu);
+        inner.set_initial_rtt(self.initial_rtt);
+        self.inner = inner;
+        self.revision = revision;
+    }
 }
 
 impl Controller for DeliveryTracking {
@@ -114,19 +207,37 @@ impl Controller for DeliveryTracking {
         self.inner.supports_ecn()
     }
     fn set_initial_rtt(&mut self, rtt: std::time::Duration) {
+        self.initial_rtt = rtt;
         self.inner.set_initial_rtt(rtt);
     }
 
     fn clone_for_path(&self, now: Instant) -> Box<dyn Controller> {
         Box::new(Self {
+            policy: self.policy.clone(),
+            revision: self.revision,
+            mtu: self.mtu,
+            initial_rtt: self.initial_rtt,
             inner: self.inner.clone_for_path(now),
             counters: self.counters.clone(),
         })
     }
     fn uses_native_pacing(&self) -> bool {
-        self.inner.uses_native_pacing()
+        self.selection_pending() || self.inner.uses_native_pacing()
     }
-    fn send_schedule(&mut self, now: Instant, in_flight: u64) -> quinn_proto::congestion::SendSchedule {
+    fn send_schedule(
+        &mut self,
+        now: Instant,
+        in_flight: u64,
+    ) -> quinn_proto::congestion::SendSchedule {
+        // Finish accounting the old sender's packets before starting a new
+        // sampler. Native BBR needs its first send to start with zero in-flight
+        // bytes. Quinn still sends ACKs and PTO probes while this gate drains.
+        if self.selection_pending() {
+            if in_flight != 0 {
+                return quinn_proto::congestion::SendSchedule::CongestionBlocked;
+            }
+            self.refresh_controller(now);
+        }
         self.inner.send_schedule(now, in_flight)
     }
     fn pacing_rate(&self) -> Option<u64> {
@@ -142,10 +253,21 @@ impl Controller for DeliveryTracking {
         self.inner.control_error()
     }
     fn on_control_event(&mut self, event: quinn_proto::congestion::ControlEvent) {
+        // PTO probes bypass the pacing gate. Keep them with the old owner
+        // while anything remains in flight; a fully drained path can switch.
+        if let quinn_proto::congestion::ControlEvent::Sent {
+            now,
+            prior_in_flight: 0,
+            ..
+        } = event
+        {
+            self.refresh_controller(now);
+        }
         let event = if matches!(
             event,
             quinn_proto::congestion::ControlEvent::ApplicationLimited { .. }
-        ) && self.counters.observer.production_held() {
+        ) && self.counters.observer.production_held()
+        {
             quinn_proto::congestion::ControlEvent::ProductionHeld
         } else {
             event
@@ -265,6 +387,7 @@ impl Controller for DeliveryTracking {
     }
 
     fn on_mtu_update(&mut self, new_mtu: u16) {
+        self.mtu = new_mtu;
         self.inner.on_mtu_update(new_mtu);
     }
 
@@ -278,6 +401,10 @@ impl Controller for DeliveryTracking {
 
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(Self {
+            policy: self.policy.clone(),
+            revision: self.revision,
+            mtu: self.mtu,
+            initial_rtt: self.initial_rtt,
             inner: self.inner.clone_box(),
             counters: self.counters.clone(),
         })
@@ -310,13 +437,22 @@ mod controller_tests {
             true
         }
         fn send_schedule(&mut self, now: Instant, _: u64) -> quinn_proto::congestion::SendSchedule {
-            quinn_proto::congestion::SendSchedule::PacedUntil(now + std::time::Duration::from_micros(123))
+            quinn_proto::congestion::SendSchedule::PacedUntil(
+                now + std::time::Duration::from_micros(123),
+            )
         }
         fn pacing_rate(&self) -> Option<u64> {
             Some(12345)
         }
         fn on_control_event(&mut self, event: quinn_proto::congestion::ControlEvent) {
-            self.0.fetch_add(if matches!(event, quinn_proto::congestion::ControlEvent::ProductionHeld) { 10 } else { 1 }, Ordering::Relaxed);
+            self.0.fetch_add(
+                if matches!(event, quinn_proto::congestion::ControlEvent::ProductionHeld) {
+                    10
+                } else {
+                    1
+                },
+                Ordering::Relaxed,
+            );
         }
         fn on_congestion_event(&mut self, _: Instant, _: Instant, _: bool, _: u64) {}
         fn on_mtu_update(&mut self, _: u16) {}
@@ -337,6 +473,10 @@ mod controller_tests {
     fn controller_forwarding_preserves_control_contract() {
         let seen = Arc::new(AtomicU64::new(0));
         let mut wrapper = DeliveryTracking {
+            policy: None,
+            revision: 0,
+            mtu: 1200,
+            initial_rtt: std::time::Duration::from_millis(333),
             inner: Box::new(Probe(seen.clone())),
             counters: Arc::new(DeliveryCounters::default()),
         };
@@ -345,18 +485,92 @@ mod controller_tests {
         assert_eq!(wrapper.pacing_rate(), Some(12345));
         assert!(wrapper.uses_native_pacing());
         let now = Instant::now();
-        assert_eq!(wrapper.send_schedule(now, 0), quinn_proto::congestion::SendSchedule::PacedUntil(now + std::time::Duration::from_micros(123)));
+        assert_eq!(
+            wrapper.send_schedule(now, 0),
+            quinn_proto::congestion::SendSchedule::PacedUntil(
+                now + std::time::Duration::from_micros(123)
+            )
+        );
         wrapper.set_initial_rtt(std::time::Duration::from_micros(7000));
         assert_eq!(seen.load(Ordering::Relaxed), 7000);
         wrapper.on_control_event(quinn_proto::congestion::ControlEvent::ApplicationLimited {
             in_flight: 0,
         });
         assert_eq!(seen.load(Ordering::Relaxed), 7001);
-        wrapper.counters.observer.hold_production(std::time::Duration::from_secs(1));
-        wrapper.on_control_event(quinn_proto::congestion::ControlEvent::ApplicationLimited { in_flight: 0 });
-        assert_eq!(seen.load(Ordering::Relaxed), 7011, "transport hold must stop pacing catch-up without marking BBR source-limited");
+        wrapper
+            .counters
+            .observer
+            .hold_production(std::time::Duration::from_secs(1));
+        wrapper.on_control_event(quinn_proto::congestion::ControlEvent::ApplicationLimited {
+            in_flight: 0,
+        });
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            7011,
+            "transport hold must stop pacing catch-up without marking BBR source-limited"
+        );
         let cloned = wrapper.clone_for_path(Instant::now());
         assert_eq!(cloned.name(), "forwarding-probe");
         assert_eq!(cloned.pacing_rate(), Some(12345));
+    }
+    struct ProbeFactory(Arc<AtomicU64>);
+    impl ControllerFactory for ProbeFactory {
+        fn build(self: Arc<Self>, _: Instant, _: u16) -> Box<dyn Controller> {
+            Box::new(Probe(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn session_selection_updates_existing_and_future_connections_without_cross_talk() {
+        let policy = CongestionPolicy::default();
+        let independent = CongestionPolicy::default();
+        let factory = Arc::new(DeliveryTrackingFactory::for_session(
+            policy.clone(),
+            Arc::new(DeliveryCounters::default()),
+        ));
+        let now = Instant::now();
+        let mut existing = factory.clone().build(now, 1200);
+        assert_eq!(existing.name(), "bbr1");
+        existing.set_initial_rtt(std::time::Duration::from_millis(7));
+        let seen = Arc::new(AtomicU64::new(0));
+        policy.set_factory(Arc::new(ProbeFactory(seen.clone())));
+        existing.on_control_event(quinn_proto::congestion::ControlEvent::Sent {
+            now,
+            generation: 0,
+            space: 2,
+            number: 1,
+            bytes: 1200,
+            prior_in_flight: 0,
+        });
+        assert_eq!(existing.name(), "forwarding-probe");
+        assert_eq!(seen.load(Ordering::Relaxed), 7001);
+        assert_eq!(factory.clone().build(now, 1200).name(), "forwarding-probe");
+        assert_eq!(independent.selection().1.build(now, 1200).name(), "bbr1");
+        policy.set_bbr3(false).unwrap();
+        // An ACK batch still reaches its old owner before the selection changes.
+        existing.on_control_event(quinn_proto::congestion::ControlEvent::Acked {
+            generation: 0,
+            space: 2,
+            number: 1,
+            bytes: 1200,
+        });
+        assert_eq!(existing.name(), "forwarding-probe");
+        existing.on_control_event(quinn_proto::congestion::ControlEvent::Feedback {
+            now,
+            prior_in_flight: 1200,
+            app_limited: false,
+            path_min_rtt: std::time::Duration::from_millis(7),
+            reliable_pending_bytes: 0,
+            production_held: false,
+        });
+        assert_eq!(existing.name(), "forwarding-probe");
+        assert_eq!(
+            existing.send_schedule(now, 1200),
+            quinn_proto::congestion::SendSchedule::CongestionBlocked
+        );
+        assert_eq!(existing.name(), "forwarding-probe");
+        existing.send_schedule(now, 0);
+        assert_eq!(existing.name(), "bbr1");
+        assert_eq!(factory.build(now, 1200).name(), "bbr1");
     }
 }

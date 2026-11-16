@@ -65,7 +65,9 @@ impl fmt::Debug for QuicConnection {
 }
 
 impl QuicConnection {
-    pub fn packet_observer(&self) -> crate::PacketObserverHandle { self.delivery.packet_observer() }
+    pub fn packet_observer(&self) -> crate::PacketObserverHandle {
+        self.delivery.packet_observer()
+    }
 
     fn new(conn: quinn::Connection, delivery: Arc<DeliveryCounters>) -> Self {
         Self {
@@ -347,6 +349,7 @@ impl RecvStream {
 }
 
 pub struct QuicServerBuilder<'a, F: AcceptorCallback> {
+    congestion: super::delivery::CongestionPolicy,
     endpoint: &'a EndPoint,
     acceptor_params: QuicAcceptorParams<F>,
     is_streamed: bool,
@@ -368,10 +371,16 @@ impl<'a, F: AcceptorCallback> QuicServerBuilder<'a, F> {
     pub fn new(endpoint: &'a EndPoint, acceptor_params: QuicAcceptorParams<F>) -> Self {
         Self {
             endpoint,
+            congestion: Default::default(),
             acceptor_params,
             is_streamed: true,
             is_secure: true,
         }
+    }
+
+    pub fn congestion_policy(mut self, policy: super::delivery::CongestionPolicy) -> Self {
+        self.congestion = policy;
+        self
     }
 
     pub fn streamed(mut self, is_streamed: bool) -> Self {
@@ -397,6 +406,7 @@ impl<'a, F: AcceptorCallback> IntoFuture for QuicServerBuilder<'a, F> {
             self.acceptor_params,
             self.is_streamed,
             self.is_secure,
+            self.congestion,
         ))
     }
 }
@@ -423,6 +433,7 @@ impl<F: AcceptorCallback> QuicServer<F> {
         acceptor_params: QuicAcceptorParams<F>,
         is_streamed: bool,
         is_secure: bool,
+        congestion: super::delivery::CongestionPolicy,
     ) -> ZResult<Self> {
         let epaddr = endpoint.address();
         let epconf = endpoint.config();
@@ -507,6 +518,7 @@ impl<F: AcceptorCallback> QuicServer<F> {
                 quic_endpoint,
                 server_config: server_config_template,
                 configure_transport,
+                congestion,
                 tls_close_link_on_expiration: server_crypto.tls_close_link_on_expiration,
                 is_streamed,
                 inner: acceptor_params,
@@ -518,6 +530,7 @@ impl<F: AcceptorCallback> QuicServer<F> {
 }
 
 pub struct QuicClientBuilder<'a> {
+    congestion: super::delivery::CongestionPolicy,
     endpoint: &'a EndPoint,
     is_streamed: bool,
     is_secure: bool,
@@ -539,10 +552,16 @@ impl<'a> QuicClientBuilder<'a> {
     pub fn new(endpoint: &'a EndPoint) -> Self {
         Self {
             endpoint,
+            congestion: Default::default(),
             is_streamed: true,
             is_secure: true,
             tls_identity: None,
         }
+    }
+
+    pub fn congestion_policy(mut self, policy: super::delivery::CongestionPolicy) -> Self {
+        self.congestion = policy;
+        self
     }
 
     pub fn streamed(mut self, is_streamed: bool) -> Self {
@@ -572,6 +591,7 @@ impl<'a> IntoFuture for QuicClientBuilder<'a> {
             self.endpoint,
             self.is_streamed,
             self.is_secure,
+            self.congestion,
             self.tls_identity,
         ))
     }
@@ -606,6 +626,7 @@ impl QuicClient {
         endpoint: &EndPoint,
         is_streamed: bool,
         is_secure: bool,
+        congestion: super::delivery::CongestionPolicy,
         tls_identity: Option<crate::tls::TlsClientIdentity>,
     ) -> ZResult<Self> {
         let epaddr = endpoint.address();
@@ -667,10 +688,9 @@ impl QuicClient {
                 .configure_max_concurrent_streams(multistream.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
             configure_experimental_transport(&mut transport_config)?;
-            transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
-                default_congestion_factory()?,
-                delivery.clone(),
-            )));
+            transport_config.congestion_controller_factory(Arc::new(
+                DeliveryTrackingFactory::for_session(congestion.clone(), delivery.clone()),
+            ));
             transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
             client_config.transport_config(transport_config.into());
             client_config
@@ -752,6 +772,7 @@ impl<F: AcceptorCallback> fmt::Debug for QuicAcceptorParams<F> {
 }
 
 pub struct QuicAcceptor<F: AcceptorCallback> {
+    congestion: super::delivery::CongestionPolicy,
     quic_endpoint: quinn::Endpoint,
     /// Template for the per-connection server config.
     server_config: quinn::ServerConfig,
@@ -781,6 +802,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             acceptor: quinn::Accept<'_>,
             template: &quinn::ServerConfig,
             configure_transport: &(dyn Fn(&mut quinn::TransportConfig) + Send + Sync),
+            congestion: &super::delivery::CongestionPolicy,
         ) -> ZResult<(quinn::Connection, Arc<DeliveryCounters>)> {
             let qc = acceptor
                 .await
@@ -790,10 +812,9 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             let mut transport_config = quinn::TransportConfig::default();
             configure_transport(&mut transport_config);
             configure_experimental_transport(&mut transport_config)?;
-            transport_config.congestion_controller_factory(Arc::new(DeliveryTrackingFactory::new(
-                default_congestion_factory()?,
-                delivery.clone(),
-            )));
+            transport_config.congestion_controller_factory(Arc::new(
+                DeliveryTrackingFactory::for_session(congestion.clone(), delivery.clone()),
+            ));
             transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
             let mut server_config = template.clone();
             server_config.transport = Arc::new(transport_config);
@@ -822,6 +843,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
                     self.quic_endpoint.accept(),
                     &self.server_config,
                     self.configure_transport.as_ref(),
+                    &self.congestion,
                 ) => {
                     match res {
                         Ok((quic_conn, delivery)) => {
@@ -982,18 +1004,18 @@ mod admission_tests {
             1_200,
             || RESERVE + 1_200
         ));
-        assert!(datagram_admitted(Some(Priority::Data), 1_200, || usize::MAX));
+        assert!(datagram_admitted(Some(Priority::Data), 1_200, || {
+            usize::MAX
+        }));
     }
 
     #[test]
     fn a_datagram_larger_than_all_free_space_never_enters_at_low_priority() {
         // A full queue with a huge frame must not wrap the arithmetic into an
         // admit.
-        assert!(!datagram_admitted(
-            Some(Priority::Data),
-            usize::MAX,
-            || usize::MAX
-        ));
+        assert!(!datagram_admitted(Some(Priority::Data), usize::MAX, || {
+            usize::MAX
+        }));
     }
 }
 
@@ -1002,16 +1024,22 @@ fn experimental_gso_setting(value: Option<&str>) -> ZResult<Option<bool>> {
         None => Ok(None),
         Some("on") => Ok(Some(true)),
         Some("off") => Ok(Some(false)),
-        _ => Err(zerror!("ADAMO_QUIC_GSO must be on or off; unset it to retain Quinn's default").into()),
+        _ => Err(
+            zerror!("ADAMO_QUIC_GSO must be on or off; unset it to retain Quinn's default").into(),
+        ),
     }
 }
 
 fn configure_experimental_transport(transport: &mut quinn::TransportConfig) -> ZResult<()> {
-    let value = match std::env::var("ADAMO_QUIC_GSO") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(_) => return Err(zerror!("ADAMO_QUIC_GSO must contain UTF-8 on or off; unset it to retain Quinn's default").into()),
-    };
+    let value =
+        match std::env::var("ADAMO_QUIC_GSO") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err(zerror!(
+                "ADAMO_QUIC_GSO must contain UTF-8 on or off; unset it to retain Quinn's default"
+            )
+            .into()),
+        };
     if let Some(enabled) = experimental_gso_setting(value.as_deref())? {
         transport.enable_segmentation_offload(enabled);
     }
@@ -1027,33 +1055,11 @@ mod experimental_gso_tests {
         assert_eq!(experimental_gso_setting(Some("on")).unwrap(), Some(true));
         assert_eq!(experimental_gso_setting(Some("off")).unwrap(), Some(false));
         for value in ["", "false", "disabled", "automatic"] {
-            let error = experimental_gso_setting(Some(value)).unwrap_err().to_string();
+            let error = experimental_gso_setting(Some(value))
+                .unwrap_err()
+                .to_string();
             assert!(error.contains("on or off") && error.contains("unset"));
         }
-    }
-}
-
-/// The controller the delivery wrapper delegates to.
-///
-/// BBR rather than Cubic: this link carries best-effort media as QUIC
-/// DATAGRAMs, and a loss-driven controller reads a lossy radio as
-/// congestion, collapses the window to a handful of packets, and turns
-/// every frame into a multi-round-trip wait. BBR paces to the measured
-/// delivery rate instead, which is what the media layer's own controller
-/// does above it.
-fn default_congestion_factory() -> ZResult<Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>> {
-    match std::env::var("ADAMO_QUIC_CONTROLLER").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("bbr1") =>
-            Ok(Arc::new(quinn::congestion::BbrConfig::default())),
-        Ok("bbr1-paced") => {
-            let mut config = quinn::congestion::BbrConfig::default();
-            config.honor_requested_pacing(true);
-            Ok(Arc::new(config))
-        }
-        Ok("bbr3") | Ok("bbr3-passive-media") => quinn::congestion::Bbr3Config::load()
-            .map(|c| Arc::new(c) as Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>)
-            .map_err(|e| zerror!("Cannot select active BBRv3: {e}. Install the matching native library or unset ADAMO_QUIC_CONTROLLER.").into()),
-        _ => Err(zerror!("ADAMO_QUIC_CONTROLLER must be bbr1, bbr1-paced, bbr3, or bbr3-passive-media").into()),
     }
 }
 

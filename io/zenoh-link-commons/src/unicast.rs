@@ -32,6 +32,8 @@ use zenoh_result::ZResult;
 pub type LinkManagerUnicast = Arc<dyn LinkManagerUnicastTrait>;
 #[async_trait]
 pub trait LinkManagerUnicastTrait: Send + Sync {
+    #[cfg(feature = "quic")]
+    fn set_quic_congestion_policy(&self, _policy: crate::quic::delivery::CongestionPolicy) {}
     async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast>;
     #[cfg(feature = "tls")]
     async fn new_link_with_tls_identity(
