@@ -349,7 +349,6 @@ impl RecvStream {
 }
 
 pub struct QuicServerBuilder<'a, F: AcceptorCallback> {
-    congestion: super::delivery::CongestionPolicy,
     endpoint: &'a EndPoint,
     acceptor_params: QuicAcceptorParams<F>,
     is_streamed: bool,
@@ -371,16 +370,10 @@ impl<'a, F: AcceptorCallback> QuicServerBuilder<'a, F> {
     pub fn new(endpoint: &'a EndPoint, acceptor_params: QuicAcceptorParams<F>) -> Self {
         Self {
             endpoint,
-            congestion: Default::default(),
             acceptor_params,
             is_streamed: true,
             is_secure: true,
         }
-    }
-
-    pub fn congestion_policy(mut self, policy: super::delivery::CongestionPolicy) -> Self {
-        self.congestion = policy;
-        self
     }
 
     pub fn streamed(mut self, is_streamed: bool) -> Self {
@@ -406,7 +399,6 @@ impl<'a, F: AcceptorCallback> IntoFuture for QuicServerBuilder<'a, F> {
             self.acceptor_params,
             self.is_streamed,
             self.is_secure,
-            self.congestion,
         ))
     }
 }
@@ -433,7 +425,6 @@ impl<F: AcceptorCallback> QuicServer<F> {
         acceptor_params: QuicAcceptorParams<F>,
         is_streamed: bool,
         is_secure: bool,
-        congestion: super::delivery::CongestionPolicy,
     ) -> ZResult<Self> {
         let epaddr = endpoint.address();
         let epconf = endpoint.config();
@@ -515,10 +506,10 @@ impl<F: AcceptorCallback> QuicServer<F> {
 
         Ok(Self {
             quic_acceptor: QuicAcceptor {
+                congestion: load_bbr3_factory()?,
                 quic_endpoint,
                 server_config: server_config_template,
                 configure_transport,
-                congestion,
                 tls_close_link_on_expiration: server_crypto.tls_close_link_on_expiration,
                 is_streamed,
                 inner: acceptor_params,
@@ -530,7 +521,6 @@ impl<F: AcceptorCallback> QuicServer<F> {
 }
 
 pub struct QuicClientBuilder<'a> {
-    congestion: super::delivery::CongestionPolicy,
     endpoint: &'a EndPoint,
     is_streamed: bool,
     is_secure: bool,
@@ -552,16 +542,10 @@ impl<'a> QuicClientBuilder<'a> {
     pub fn new(endpoint: &'a EndPoint) -> Self {
         Self {
             endpoint,
-            congestion: Default::default(),
             is_streamed: true,
             is_secure: true,
             tls_identity: None,
         }
-    }
-
-    pub fn congestion_policy(mut self, policy: super::delivery::CongestionPolicy) -> Self {
-        self.congestion = policy;
-        self
     }
 
     pub fn streamed(mut self, is_streamed: bool) -> Self {
@@ -591,7 +575,6 @@ impl<'a> IntoFuture for QuicClientBuilder<'a> {
             self.endpoint,
             self.is_streamed,
             self.is_secure,
-            self.congestion,
             self.tls_identity,
         ))
     }
@@ -626,7 +609,6 @@ impl QuicClient {
         endpoint: &EndPoint,
         is_streamed: bool,
         is_secure: bool,
-        congestion: super::delivery::CongestionPolicy,
         tls_identity: Option<crate::tls::TlsClientIdentity>,
     ) -> ZResult<Self> {
         let epaddr = endpoint.address();
@@ -675,6 +657,7 @@ impl QuicClient {
             .try_into()
             .map_err(|e| zerror!("Can not get QUIC config {host}: {e}"))?;
         let delivery = Arc::new(DeliveryCounters::default());
+        let congestion = load_bbr3_factory()?;
         quic_endpoint.set_default_client_config({
             let mut client_config = quinn::ClientConfig::new({
                 if is_secure {
@@ -689,7 +672,7 @@ impl QuicClient {
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
             configure_experimental_transport(&mut transport_config)?;
             transport_config.congestion_controller_factory(Arc::new(
-                DeliveryTrackingFactory::for_session(congestion.clone(), delivery.clone()),
+                DeliveryTrackingFactory::new(congestion, delivery.clone()),
             ));
             transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
             client_config.transport_config(transport_config.into());
@@ -772,8 +755,8 @@ impl<F: AcceptorCallback> fmt::Debug for QuicAcceptorParams<F> {
 }
 
 pub struct QuicAcceptor<F: AcceptorCallback> {
-    congestion: super::delivery::CongestionPolicy,
     quic_endpoint: quinn::Endpoint,
+    congestion: Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>,
     /// Template for the per-connection server config.
     server_config: quinn::ServerConfig,
     configure_transport: Arc<dyn Fn(&mut quinn::TransportConfig) + Send + Sync>,
@@ -802,7 +785,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             acceptor: quinn::Accept<'_>,
             template: &quinn::ServerConfig,
             configure_transport: &(dyn Fn(&mut quinn::TransportConfig) + Send + Sync),
-            congestion: &super::delivery::CongestionPolicy,
+            congestion: &Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>,
         ) -> ZResult<(quinn::Connection, Arc<DeliveryCounters>)> {
             let qc = acceptor
                 .await
@@ -813,7 +796,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             configure_transport(&mut transport_config);
             configure_experimental_transport(&mut transport_config)?;
             transport_config.congestion_controller_factory(Arc::new(
-                DeliveryTrackingFactory::for_session(congestion.clone(), delivery.clone()),
+                DeliveryTrackingFactory::new(congestion.clone(), delivery.clone()),
             ));
             transport_config.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_BYTES);
             let mut server_config = template.clone();
@@ -1244,4 +1227,10 @@ impl QuicStreams {
             RecvStream::Accepted(recv) => Ok(recv),
         }
     }
+}
+
+fn load_bbr3_factory() -> ZResult<Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>> {
+    quinn::congestion::Bbr3Config::load()
+        .map(|config| Arc::new(config) as _)
+        .map_err(|error| zerror!("Cannot load QUIC BBRv3 controller: {error}").into())
 }

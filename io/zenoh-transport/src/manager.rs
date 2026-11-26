@@ -121,8 +121,6 @@ pub type RemoteBoundCallback = Arc<dyn Fn(TransportPeer) -> ZResult<Option<Bound
 ///         .unwrap();
 /// ```
 pub struct TransportManagerConfig {
-    #[cfg(feature = "transport_quic")]
-    pub quic_congestion: zenoh_link_commons::quic::delivery::CongestionPolicy,
     pub version: u8,
     pub zid: ZenohIdProto,
     pub whatami: WhatAmI,
@@ -527,8 +525,6 @@ impl TransportManagerBuilder {
             best_effort_reorder_window: self.best_effort_reorder_window,
             unicast: unicast.config,
             multicast: multicast.config,
-            #[cfg(feature = "transport_quic")]
-            quic_congestion: Default::default(),
             link_configs: self.link_configs,
             handler,
             tx_threads: self.tx_threads,

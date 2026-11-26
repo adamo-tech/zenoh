@@ -244,7 +244,6 @@ impl fmt::Debug for LinkUnicastQuic {
 
 #[derive(Debug)]
 pub struct LinkManagerUnicastQuic {
-    congestion: std::sync::RwLock<zenoh_link_commons::quic::delivery::CongestionPolicy>,
     manager: NewLinkChannelSender,
     listeners: ListenersUnicastIP,
 }
@@ -254,26 +253,14 @@ impl LinkManagerUnicastQuic {
         Self {
             manager,
             listeners: ListenersUnicastIP::new(),
-            congestion: Default::default(),
         }
     }
 }
 
 #[async_trait]
 impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
-    fn set_quic_congestion_policy(
-        &self,
-        policy: zenoh_link_commons::quic::delivery::CongestionPolicy,
-    ) {
-        *self.congestion.write().unwrap_or_else(|e| e.into_inner()) = policy;
-    }
     async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {
-        let policy = self
-            .congestion
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        make_client_link(endpoint, None, policy).await
+        make_client_link(endpoint, None).await
     }
 
     async fn new_link_with_tls_identity(
@@ -281,12 +268,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
         endpoint: EndPoint,
         identity: zenoh_link_commons::tls::TlsClientIdentity,
     ) -> ZResult<LinkUnicast> {
-        let policy = self
-            .congestion
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        make_client_link(endpoint, Some(identity), policy).await
+        make_client_link(endpoint, Some(identity)).await
     }
 
     async fn new_listener(&self, endpoint: EndPoint) -> ZResult<Locator> {
@@ -298,18 +280,11 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
             make_link: acceptor_callback,
         };
 
-        let policy = self
-            .congestion
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
         let QuicServer {
             quic_acceptor,
             locator,
             local_addr,
-        } = QuicServerBuilder::new(&endpoint, acceptor_params)
-            .congestion_policy(policy)
-            .await?;
+        } = QuicServerBuilder::new(&endpoint, acceptor_params).await?;
 
         // Update the endpoint locator address
         let endpoint = EndPoint::new(
@@ -346,9 +321,8 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastQuic {
 async fn make_client_link(
     endpoint: EndPoint,
     identity: Option<zenoh_link_commons::tls::TlsClientIdentity>,
-    congestion: zenoh_link_commons::quic::delivery::CongestionPolicy,
 ) -> ZResult<LinkUnicast> {
-    let mut builder = QuicClientBuilder::new(&endpoint).congestion_policy(congestion);
+    let mut builder = QuicClientBuilder::new(&endpoint);
     if let Some(identity) = identity {
         builder = builder.tls_identity(identity);
     }
