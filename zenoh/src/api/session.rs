@@ -1497,18 +1497,6 @@ impl Session {
         })
     }
 
-    /// Select BBRv3 for this session's QUIC connections, including reconnects.
-    ///
-    /// Existing senders drain in-flight packets before changing, without reconnecting.
-    #[cfg(feature = "transport_quic")]
-    #[zenoh_macros::unstable]
-    pub fn set_quic_bbr3(&self, enabled: bool) -> ZResult<()> {
-        let runtime = self.0.runtime.static_runtime()
-            .ok_or_else(|| zerror!("QUIC controller selection requires an owned runtime"))?;
-        runtime.manager().config.quic_congestion.set_bbr3(enabled)
-            .map_err(|e| zerror!("Cannot configure QUIC congestion control: {e}").into())
-    }
-
     pub(crate) fn runtime(&self) -> &GenericRuntime {
         &self.0.runtime
     }

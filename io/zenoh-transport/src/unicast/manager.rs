@@ -403,8 +403,6 @@ impl TransportManager {
         } else {
             let lm =
                 LinkManagerBuilderUnicast::make(self.new_unicast_link_sender.clone(), endpoint)?;
-            #[cfg(feature = "transport_quic")]
-            lm.set_quic_congestion_policy(self.config.quic_congestion.clone());
             w_guard.insert(key, lm.clone());
             Ok(lm)
         }
